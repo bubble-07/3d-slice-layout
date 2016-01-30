@@ -7,7 +7,6 @@
 #include <boost/filesystem.hpp>
 #include "math.h"
 #include <utility>
-using namespace utility;
 using namespace boost::filesystem;
 using namespace std;
 
@@ -18,10 +17,29 @@ double MATERIAL_WIDTH = 96.0 * INCHES_TO_MM;
 double MATERIAL_LENGTH = 48.0 * INCHES_TO_MM;
 double MATERIAL_HEIGHT = (23.0 / 32.0) * INCHES_TO_MM; 
 
+//To be set later
+int BOTTOM = 0;
+int TOP = 0;
+int LEFT = 0;
+int RIGHT = 0;
+
 
 double sq(double x) {
     return x * x;
 }
+int sgn(double x) {
+    return (x > 0) - (x < 0);
+}
+
+//I don't like that std::vector doesn't return the popped element.
+//Still has UB if in is empty, though
+template<typename T> T pop_back(vector<T> &in) {
+    T ret = in[in.size() - 1];
+    in.pop_back();
+    return ret;
+}
+
+class Mat2d;
 
 class Vec2d { 
     public:
@@ -30,14 +48,15 @@ class Vec2d {
         this->x = x;
         this->y = y;
     }
-    double dot(Vec2d &other) {
+    double dot(const Vec2d &other) {
         return x * other.x + y * other.y;
     }
-    double dist(Vec2d &pos) {
+    double dist(const Vec2d &pos) {
         return sqrt(sq(x - pos.x) + sq(y - pos.y));
     }
     double norm() {
         return dist(Vec2d(0,0));
+    }
     Vec2d normalize() {
         return Vec2d(x, y) * (1.0 / norm());
     }
@@ -49,27 +68,53 @@ class Vec2d {
         return Vec2d(-y, x);
     }
     //Returns the rotation direction (+1 = CCW) to another vector
-    int rot_direction(Vec2d &other) {
-        Mat2d matr(x, y, other.x, other.y);
-        return sgn(matr.det());
-    }
+    int rot_direction(const Vec2d &other); 
+
     bool operator==(Vec2d other) {
-        return this.x == other.x && this.y == other.y;
+        return x == other.x && y == other.y;
+    }
+    const Vec2d operator*(double scaling) {
+        return Vec2d(x * scaling, y * scaling);
     }
 };
 
 Vec2d operator+(const Vec2d &one, const Vec2d &two) {
     return Vec2d(one.x + two.x, one.y + two.y);
 }
-Vec2d operator*(const Vec2d &one, double scaling) {
-    return Vec2d(one.x * scaling, one.y * scaling);
-}
 Vec2d operator*(double scaling, const Vec2d &one) {
-    return one * scaling;
+    return Vec2d(one.x * scaling, one.y * scaling);
 }
 Vec2d operator-(const Vec2d &one, const Vec2d &two) {
     return one + (-1.0 * two);
 }
+
+class Mat2d {
+    double a;
+    double b;
+    double c;
+    double d;
+    public:
+    Mat2d(double a, double b, double c, double d) {
+        this->a = a; this->b = b; this->c = c; this->d = d;
+    }
+    double det() {
+        return a*c-b*d;
+    }
+    Mat2d inverse() {
+        return Mat2d(d, -b, -c, a) * (1.0 / det());
+    }
+    Vec2d operator*(const Vec2d& in) {
+        return Vec2d(a*in.x + b*in.y, c*in.x + d*in.y);
+    }
+    Mat2d operator*(double in) {
+        return Mat2d(a * in, b * in, c * in, d * in);
+    }
+};
+
+int Vec2d::rot_direction(const Vec2d &other) {
+    Mat2d matr(x, y, other.x, other.y);
+    return sgn(matr.det());
+}   
 
 class Shape {
     public:
@@ -100,59 +145,44 @@ class Ring : public Shape {
     double distance_to(Ring other) {
         return fmax(0, pos.dist(other.pos) - outer_radius - other.outer_radius);
     }
+    using Shape::distance_to;
+
+    bool strict_in(Vec2d test) {
+        double dist = pos.dist(test);
+        return dist > inner_radius && dist < outer_radius;
+    } 
     Vec2d closest_point_to(Vec2d p) {
         if (strict_in(p)) {
             return p;
         }
         return (p - pos).normalize() * outer_radius;
     }
-    bool strict_in(Vec2d test) {
-        double dist = pos.dist(test);
-        return dist > inner_radius && dist < outer_radius;
-    }
+    
     bool operator==(Ring other) {
         return (pos == other.pos) && (inner_radius == other.inner_radius) && 
             (outer_radius == other.outer_radius);
     }
 };
-
-class Slice { 
+//Line of the form ax+by=c
+class Line2d {
     public:
-    //Bounding ring of mesh in mesh coordinates
-    Ring bounding_ring;
-    //Position of mesh center relative to material
-    Vec2d pos;
-    //Mesh represented (there is a unique slice per mesh)
-    tinyobj::mesh_t &mesh;
-    Slice(tinyobj::mesh_t &src_mesh) : 
-        bounding_ring(Vec2d(0,0),0,0),
-        pos(0,0), mesh(src_mesh) {
-    }
-};
-
-class Mat2d {
     double a;
     double b;
     double c;
-    double d;
-    public:
-    Mat2d(double a, double b, double c, double d) {
-        this->a = a; this->b = b; this->c = c; this->d = d;
+    Line2d(double a, double b, double c) {
+        this->a = a; this->b = b; this->c = c;
     }
-    double det() {
-        return a*c-b*d;
-    }
-    Mat2d inverse() {
-        return Mat2d(d, -b, -c, a) * (1.0 / det());
-    }
-    Vec2d operator*(const Vec2d& in) {
-        return Vec2d(a*in.x + b*in.y, c*in.x, d*in.y);
-    }
-    Mat2d operator*(double in) {
-        return Mat2d(a * in, b * in, c * in, d * in);
+    Vec2d intersect(Line2d other) {
+        Mat2d m(a, b, other.a, other.b);
+        m = m.inverse();
+        Vec2d k(c, other.c);
+        return m*k;
     }
 };
-    
+
+Line2d line_through(Vec2d p, Vec2d tangent) {
+    return Line2d(tangent.x, tangent.y, tangent.dot(p));
+}
 
 class LineSeg2d : public Shape {
     public:
@@ -177,13 +207,13 @@ class LineSeg2d : public Shape {
         Vec2d closest = l.intersect(toLine());
         //Now, clamp to the line
         double line_seg_len = pt1.dist(pt2);
-        double dist_1 = closest.dist(p1);
-        double dist_2 = closest.dist(p2);
+        double dist_1 = closest.dist(pt1);
+        double dist_2 = closest.dist(pt2);
         if (dist_1 + dist_2 > line_seg_len) {
             if (dist_1 > dist_2) {
-                return p2;
+                return pt2;
             }
-            return p1;
+            return pt1;
         }
         return closest;
     }
@@ -192,24 +222,17 @@ class LineSeg2d : public Shape {
     }
 };
 
-Line2d line_through(Vec2d p, Vec2d tangent) {
-    return Line2d(tangent.x, tangent.y, tangent.dot(p));
-}
-
-//Line of the form ax+by=c
-class Line2d {
+class Slice { 
     public:
-    double a;
-    double b;
-    double c;
-    Line2d(double a, double b, double c) {
-        this->a = a; this->b = b; this->c = c;
-    }
-    Vec2d intersect(Line2d other) {
-        Mat2d m(a, b, other.a, other.b);
-        m = m.inverse();
-        Vec2d k(c, other.c);
-        return m*k;
+    //Bounding ring of mesh in mesh coordinates
+    Ring bounding_ring;
+    //Position of mesh center relative to material
+    Vec2d pos;
+    //Mesh represented (there is a unique slice per mesh)
+    tinyobj::mesh_t &mesh;
+    Slice(tinyobj::mesh_t &src_mesh) : 
+        bounding_ring(Vec2d(0,0),0,0),
+        pos(0,0), mesh(src_mesh) {
     }
 };
 
@@ -247,37 +270,22 @@ Ring calc_circle_directly(vector<Vec2d> boundaryPoints) {
 //and http://www.sunshine2k.de/coding/java/Welzl/Welzl.html
 Ring bounding_circle_helper(vector<Vec2d> planePoints, vector<Vec2d> boundaryPoints) {
     if (planePoints.size() + boundaryPoints.size() <= 3) {
-        vector<Vec2d> combined = planePoints.copy();
+        vector<Vec2d> combined = vector<Vec2d>(planePoints);
         combined.insert(combined.end(), boundaryPoints.begin(), boundaryPoints.end());
         return calc_circle_directly(combined);
     }
     else {
         permute(planePoints);
-        Vec2d p = planePoints.pop_back();
+        Vec2d p = pop_back(planePoints);
         Ring r = bounding_circle_helper(planePoints, boundaryPoints);
-        if (!p.strict_in(r)) {
-            vector<Vec2d> enlargedBoundary = boundaryPoints.copy();
+        if (!r.strict_in(p)) {
+            vector<Vec2d> enlargedBoundary = vector<Vec2d>(boundaryPoints);
             enlargedBoundary.push_back(p);
             r = bounding_circle_helper(planePoints, enlargedBoundary);
             enlargedBoundary.clear();
         }
         return r;
     }
-}
-
-//Gets the bounding ring of a slice that already has been populated
-//with bounding circle information
-void get_bounding_ring(Slice &slice, vector<LineSeg2d> &lines) {
-    Vec2d center = slice.bounding_ring.pos;
-    if (intersects(center, lines)) {
-        //Must NOT be a ring, do nothing
-        return;
-    }
-    double inner = 0.0;
-    for (auto l : lines) {
-        inner = fmax(inner, l.closest_point_to(center));
-    }
-    slice.bounding_ring.inner_radius = inner;
 }
 
 //Computes whether or not a given point intersects any 2d cross-section of the slice
@@ -293,7 +301,7 @@ bool intersects(Vec2d p, vector<LineSeg2d> &lines) {
         LineSeg2d l3 = lines[3*i+2];
         //Technique drawn from http://www.blackpawn.com/texts/pointinpoly/
         int rot_direction = getDir(p, l1);
-        if (rot_direction == getDir(p, l2) && rot_direction = getDir(p, l3)) {
+        if (rot_direction == getDir(p, l2) && rot_direction == getDir(p, l3)) {
             //If the vector from a triangle vertex to a point lies on the same
             //side of every line, it must be in the triangle.
             return true;
@@ -302,13 +310,28 @@ bool intersects(Vec2d p, vector<LineSeg2d> &lines) {
     return false;
 }
 
+//Gets the bounding ring of a slice that already has been populated
+//with bounding circle information
+void get_bounding_ring(Slice* slice, vector<LineSeg2d> &lines) {
+    Vec2d center = slice->bounding_ring.pos;
+    if (intersects(center, lines)) {
+        //Must NOT be a ring, do nothing
+        return;
+    }
+    double inner = 0.0;
+    for (auto l : lines) {
+        inner = fmax(inner, l.distance_to(center));
+    }
+    slice->bounding_ring.inner_radius = inner;
+}
+
 //Gets all 2d line segments of triangles in an order that respects triangles.
-vector<LineSeg2d> get_line_segs(Slice &slice) {
+vector<LineSeg2d> get_line_segs(Slice *slice) {
     vector<LineSeg2d> ret;
-    for (int i = 0; i < slice.mesh.positions.size() / 9; i++) {
-        Vec2d p1 = Vec2d(slice.mesh.positions[9*i], slice.mesh.positions[9*i+1]);
-        Vec2d p2 = Vec2d(slice.mesh.positions[3+9*i], slice.mesh.position[3+9*i+1]);
-        Vec2d p3 = Vec2d(slice.mesh.positions[6+9*i], slice.mesh.position[6+9*i+1]);
+    for (int i = 0; i < slice->mesh.positions.size() / 9; i++) {
+        Vec2d p1 = Vec2d(slice->mesh.positions[9*i], slice->mesh.positions[9*i+1]);
+        Vec2d p2 = Vec2d(slice->mesh.positions[3+9*i], slice->mesh.positions[3+9*i+1]);
+        Vec2d p3 = Vec2d(slice->mesh.positions[6+9*i], slice->mesh.positions[6+9*i+1]);
         ret.push_back(LineSeg2d(p1, p2));
         ret.push_back(LineSeg2d(p2, p3));
         ret.push_back(LineSeg2d(p3, p1));
@@ -316,32 +339,31 @@ vector<LineSeg2d> get_line_segs(Slice &slice) {
     return ret;
 }
 
-void compute_bounds(Slice &slice) {
+void compute_bounds(Slice *slice) {
     vector<Vec2d> points;
     //TODO: avoid this by overriding Vec2d with projection
-    for (int i = 0; i < slice.mesh.positions.size / 3; i++) {
-        points.push_back(Vec2d(slice.mesh.positions[3*i+0], slice.mesh.positions[3*i+1]));
+    for (int i = 0; i < slice->mesh.positions.size() / 3; i++) {
+        points.push_back(Vec2d(slice->mesh.positions[3*i+0], slice->mesh.positions[3*i+1]));
     }
-    slice.bounding_ring = bounding_circle_helper(points, vector<Vec2d>());
+    slice->bounding_ring = bounding_circle_helper(points, vector<Vec2d>());
 
     vector<LineSeg2d> lineSegs = get_line_segs(slice);
-    
-    slice.bounding_ring = get_bounding_ring(slice, lineSegs);
 
+    get_bounding_ring(slice, lineSegs);
 }
 
 //TODO: Ensure d_min kept with the list of corner placements to avoid re-calculation.
-double min_dist(Ring c, Shape u, Shape v, &vector<pair<&Slice, Ring>> cfg, &vector<LineSeg2d> edges) {
+double min_dist(Ring c, Shape u, Shape v, vector<pair<Slice*, Ring>> &cfg, vector<LineSeg2d> &edges) {
     //d_min will hold the distance from the ring's center to the closest shape in the
     //configuration (including sides), but exclude u and v
-    d_min = nan("");
+    double d_min = nan("");
     for (auto l : edges) {
         //TODO: How to test for equality here?
         if (true /*(not (l == u)) && (not (l == v)) */) {
             d_min = fmin(d_min, l.distance_to(c.pos));
         }
     }
-    for (pair<&Slice, Ring> p : cfg) {
+    for (pair<Slice*, Ring> p : cfg) {
         Ring r = p.second;
         //TODO: How to test for equality here?
         if (true /*(not (r == u)) && (not (r == v)) */) {
@@ -357,110 +379,16 @@ double hole_degree(Ring c, double d_min) {
     return (1 - (d_min / c.outer_radius));
 }
 
-struct Placement {
+class Placement {
+    public:
+    Placement(int index, Vec2d pos_init, double d_min) : pos(pos_init.x, pos_init.y) {
+        this->index = index;
+        this->d_min = d_min;
+    }
     int index;
     Vec2d pos;
     double d_min;
 };
-
-
-
-//Citation: This is a modified version of http://citeseerx.ist.psu.edu/viewdoc/download?doi=10.1.1.99.5620&rep=rep1&type=pdf
-vector<pair<&Slice, Ring>> ring_pack(vector<&Slice> in) {
-    vector<pair<&Slice, Ring>> config;
-    vector<Placement> placements;
-    vector<LineSeg2d> edges;
-    
-
-    Vec2d v1 = Vec2d(0,0);
-    Vec2d v2 = Vec2d(MATERIAL_WIDTH, 0);
-    Vec2d v3 = Vec2d(MATERIAL_WIDTH, MATERIAL_LENGTH);
-    Vec2d v4 = Vec2d(0, MATERIAL_LENGTH);
-
-    edges.emplace_back(v1, v2);
-    edges.emplace_back(v2, v3);
-    edges.emplace_back(v3, v4);
-    edges.emplace_back(v4, v1);
-
-    auto radiusCompare = [](&Slice a, &Slice b) {
-        return a.bounding_ring.outer_radius >= b.bounding_ring.outer_radius;
-    }
-
-    //Sorted in order of decreasing radius
-    std::sort(in.begin(), in.end(), radiusCompare);
-
-    //Instead of what's done in the paper, we arbitrarily pick an initial
-    //configuration with the two smallest rings at opposite ends of the rectangle.
-    //This reduces the time complexity from O(n^10) to O(n^8).
-    Slice& s1 = in.pop_back();
-    Slice& s2 = in.pop_back();
-    double r1 = s1.bounding_ring.outer_radius;
-    double r2 = s2.bounding_ring.outer_radius;
-    config.emplace_back(s1, s1.bounding_ring.move_to(Vec2d(r1, r1)));
-    config.emplace_back(s2, s2.bounding_ring.move_to(Vec2d(MATERIAL_WIDTH - r2, MATERIAL_LENGTH - r2));
-    
-    //Generate initial placements
-    for (int i = 0; i < in.size(); i++) {
-        vector temp = gen_placements(i, in[i].bounding_ring.outer_radius, config, edges);
-        placements.insert(placements.end(), temp.begin(), temp.end());
-    }
-
-    auto addPlacement = [](Placement accepted) {
-        Slice &s = in[accepted.index];
-        Ring ci = s.bounding_ring.move_to(accepted.pos);
-
-        config.emplace_back(s, ci);
-
-        //TODO: Make this cache-friendlier?
-
-        //Great, we modified "config", but now, we also need to modify both "placements"
-        //and "in". We'll swap in[p.index] to the back of in, then pop it. 
-        //Since we need to loop over "placements" anyway, we'll modify the indices as needed
-        vector<Placement> new_placements;
-        for (Placement p : placements) {
-            //Ignore placements involving ci
-            if (p.index == accepted.index) {
-                continue;
-            }
-            Ring p_bounds = in[p.index].bounding_ring.move_to(p.pos);
-            //Ignore placements that would overlap ci
-            if (ci.intersects(p_bounds)) {
-                continue;
-            }
-            //Update d_min for all remaining placements
-            p.d_min = fmin(d_min, ci.distance_to(p_bounds));
-
-            if (p.index == in.size() - 1) {
-                //In this case, change the index to the index of the accepted.
-                p.index = accepted.index; 
-            }
-            new_placements.push_back(p);
-        }
-        placements.clear();
-        placements = new_placements;
-        //Now, perform the swap and pop on 'in'
-        in[accepted.index] = in[in.size() - 1];
-        in.pop_back();
-
-        //Okay, but we're still not done -- now we must add new placements involving ci.
-        
-    };
-
-    while (placements.size() > 0) {
-        //Stores the index into the corner placements with the maximum lambda
-        int max_index = 0;
-        int max_lambda = 0;
-        //Find the best corner placement
-        for (i = 0; i < placements.size(); i++) {
-            double lambda = hole_degree(in[placements[i].index].bounding_ring, placements[i].d_min);
-            if (lambda > max_lambda) {
-                max_index = i;
-                max_lambda = lambda;
-            }
-        }
-        addPlacement(placements[max_index]);
-    }
-}
 
 bool eps_equals(double a, double b) {
     return (a - b) < 0.001;
@@ -468,7 +396,7 @@ bool eps_equals(double a, double b) {
 
 vector<double> quad_solve(double a, double b, double c) {
     vector<double> result;
-    discrim = b*b-4*a*c;
+    double discrim = b*b-4*a*c;
     //TODO: use eps_equals!
     if (eps_equals(discrim, 0)) {
         result.push_back(-b / (2*a));
@@ -480,25 +408,11 @@ vector<double> quad_solve(double a, double b, double c) {
     return result;
 }
 
-//Gets the center of a circle tangent to a circle and a horizontal line, with radius r
-vector<Vec2d> get_tangent_circle_center_horiz(Ring one, double y_h, double r) {
-    delta_x = sqrt(sq(one.outer_radius + r) - sq(y_h = r - one.pos.y));
-    vector<Vec2d> result;
-    result.emplace_back(one.pos.x + delta_x, y_h + r);
-    result.emplace_back(one.pos.x - delta_x, y_h + r);
-}
-//Same as before. TODO: Make this not as dumb
-vector<Vec2d> get_tangent_circle_center_vert(Ring one, double x_h, double r) {
-    return perp(
-        get_tangent_circle_center_horiz(Ring(one.pos.antiperp(), one.inner_radius, one.outer_radius),
-                                           x_h, r));
-}
-
-    
-
 vector<Vec2d> perp(vector<Vec2d> in) {
-    vector<Vec2d> result(in.size());
-    for (int i = 0; i < in.size(); i++) { result[i] = in.perp(); }
+    vector<Vec2d> result;
+    for (int i = 0; i < in.size(); i++) { 
+        result.emplace_back(in[i].perp());
+    }
     return result;
 }
 
@@ -528,12 +442,12 @@ vector<Vec2d> get_tangent_circle_center(Ring one, Ring two, double r) {
     double b = 2*(m*(k-y1)-x1);
     double c = (x1*x1 + sq(k-y1) - sq(r+r1));
     vector<double> x = quad_solve(a, b, c);
-    vector<Vec2d> result(x.size());
-    std::transform(x.begin(), x.end(), result.begin(), [](double x) { return Vec2d(x, m*x + k) });
+    vector<Vec2d> result(x.size(), Vec2d(0,0));
+    std::transform(x.begin(), x.end(), result.begin(), [&m, &k](double x) { return Vec2d(x, m*x + k); });
     return result;
 }
 
-bool placement_valid(Vec2d pos, double r, &vector<pair<&Slice, Ring>> cfg) {
+bool placement_valid(Vec2d pos, double r, vector<pair<Slice*, Ring>> &cfg) {
     if (pos.x + r > MATERIAL_WIDTH || pos.x - r < 0 ||
         pos.y + r > MATERIAL_LENGTH || pos.y - r < 0) {
         return false;
@@ -547,74 +461,201 @@ bool placement_valid(Vec2d pos, double r, &vector<pair<&Slice, Ring>> cfg) {
     return true;
 }
 
-Placement pos_to_placement(Vec2d p, Shape u, Shape v, vector<pair<Slice&, Ring>> &cfg, vector<LineSeg2d> &edges) {
-    Placement result;
-    result.index = index;
-    result.pos = p;
-    result.d_min = min_dist(Ring(p, 0, r), u, v, cfg, edges);
-    return result;
+Placement pos_to_placement(int index, Vec2d p, double r, Shape u, Shape v, 
+                           vector<pair<Slice*, Ring>> &cfg, vector<LineSeg2d> &edges) {
+    return Placement(index, p, min_dist(Ring(p, 0, r), u, v, cfg, edges));
 }
 
-void add_centers(vector<Vec2d> centers, double r, vector<pair<&Slice, Ring>> &cfg, vector<LineSeg2d> &edges)
-
-vector<Placement> gen_placements_involving(Ring one, int index, double r, &vector<pair<&Slice, Ring>> cfg,
-                                           &vector<LineSeg2d> edges) {
-}
-
-//Generate all possible placements for a given index
-vector<Placement> gen_placements(int index, double r, &vector<pair<&Slice, Ring>> cfg, &vector<LineSeg2d> edges) {
-    auto pos_to_placement = [](Vec2d p, Shape u, Shape v) -> Placement { 
-        Placement result;
-        result.index = index;
-        result.pos = p;
-        result.d_min = min_dist(Ring(p, 0, r), u, v, cfg, edges);
-        return result;
+void add_center(int index, Vec2d center, double r, Shape one, Shape two, 
+        vector<pair<Slice*, Ring>> &cfg, vector<LineSeg2d> &edges, vector<Placement> &result) {
+    if (placement_valid(center, r, cfg)) {
+        result.push_back(pos_to_placement(index, center, r, one, two, cfg, edges));
     }
+}
 
+
+//Gets the center of a circle tangent to a circle and a horizontal line, with radius r
+vector<Vec2d> get_tangent_circle_center_horiz(Ring one, double y_h, double r) {
+    double delta_x = sqrt(sq(one.outer_radius + r) - sq(y_h = r - one.pos.y));
+    vector<Vec2d> result;
+    result.emplace_back(one.pos.x + delta_x, y_h + r);
+    result.emplace_back(one.pos.x - delta_x, y_h + r);
+}
+//Same as before. TODO: Make this not as dumb
+vector<Vec2d> get_tangent_circle_center_vert(Ring one, double x_h, double r) {
+    return perp(
+        get_tangent_circle_center_horiz(Ring(one.pos.antiperp(), one.inner_radius, one.outer_radius),
+                                           x_h, r));
+}
+
+
+vector<Placement> gen_placements_involving(Ring one, int index, double r, vector<pair<Slice*, Ring>> &cfg,
+                                           vector<LineSeg2d> &edges) {
     vector<Placement> result;
+    
+    auto add_centers = [&index, &cfg, &r, &edges, &result](vector<Vec2d> centers, Shape one, Shape two) {
+        for (Vec2d center : centers) { add_center(index, center, r, one, two, cfg, edges, result); }
+    };
 
-    auto add_center = [](Vec2d center, Shape one, Shape two) {
-        if (placement_valid(center, r, cfg)) {
-            result.push_back(pos_to_placement(center, one, two));
+    //Handle circle-circle case
+    for (int j = 0; j < cfg.size(); j++) {
+        //TODO: Can this check be optimized by storing pairwise distances with the config?
+        //Make sure that a corner placement is remotely possible
+        Ring two = cfg[j].second;
+        if (one.distance_to(two) > 2*r) {
+            continue;
+        }
+        else {
+            add_centers(get_tangent_circle_center(one, two, r), one, two);
         }
     }
     
-    auto add_centers = [](vector<Vec2d> centers, Shape one, Shape two) {
-        for (Vec2d center : centers) { add_center(center, one, two) }
-    }
+    //Now, circle-line case
+    add_centers(get_tangent_circle_center_horiz(one, 0, r), one, edges[BOTTOM]);
+    add_centers(get_tangent_circle_center_vert(one, 0, r), one, edges[LEFT]);
+    add_centers(get_tangent_circle_center_horiz(one, MATERIAL_LENGTH, r), one, edges[TOP]);
+    add_centers(get_tangent_circle_center_vert(one, MATERIAL_WIDTH, r), one, edges[RIGHT]);
+    return result;
+
+}
+
+//Generate all possible placements for a given index
+vector<Placement> gen_placements(int index, double r, vector<pair<Slice*, Ring>> &cfg, vector<LineSeg2d> &edges) {
+    vector<Placement> result;
+
+    auto add = [&index, &r, &cfg, &edges, &result](Vec2d center, Shape one, Shape two) {
+        add_center(index, center, r, one, two, cfg, edges, result);
+    };
 
     //Compute circle-circle and circle-line corner placements  
     for (int i = 0; i < cfg.size(); i++) {
         Ring one = cfg[i].second;
-        for (int j = 0; j < cfg.size(); j++) {
-            //TODO: Can this check be optimized by storing pairwise distances with the config?
-            //Make sure that a corner placement is remotely possible
-            Ring two = cfg[j].second;
-            if (one.distance_to(second) > 2*r) {
-                continue;
-            }
-            else {
-                add_centers(get_tangent_circle_center(one, two, r));
-            }
-        }
-        
-        //Now, circle-line case
-        add_centers(get_tangent_circle_horiz(one, 0, r));
-        add_centers(get_tangent_circle_vert(one, 0, r));
-        add_centers(get_tangent_circle_horiz(one, MATERIAL_LENGTH, r));
-        add_centers(get_tangent_circle_vert(one, MATERIAL_WIDTH, r));
+        vector<Placement> temp = gen_placements_involving(one, index, r, cfg, edges);
+        result.insert(result.end(), temp.begin(), temp.end());
+        temp.clear();
     }
+
     //Finally, test the line-line placements
-    vector<Vec2d> corner;
-    corner.emplace_back(r, r);
-    corner.emplace_back(MATERIAL_WIDTH - r, r);
-    corner.emplace_back(MATERIAL_WIDTH - r, MATERIAL_LENGTH - r);
-    corner.emplace_back(r, MATERIAL_LENGTH - r);
-    add_centers(corner);
+    add(Vec2d(r, r), edges[BOTTOM], edges[LEFT]);
+    add(Vec2d(MATERIAL_WIDTH - r, r), edges[BOTTOM], edges[RIGHT]);
+    add(Vec2d(MATERIAL_WIDTH - r, MATERIAL_LENGTH - r), edges[RIGHT], edges[TOP]);
+    add(Vec2d(r, MATERIAL_LENGTH - r), edges[TOP], edges[LEFT]);
 
     return result;
 }
 
+
+//Citation: This is a modified version of http://citeseerx.ist.psu.edu/viewdoc/download?doi=10.1.1.99.5620&rep=rep1&type=pdf
+vector<pair<Slice*, Ring>> ring_pack(vector<Slice*> in) {
+    vector<pair<Slice*, Ring>> config;
+    vector<Placement> placements;
+    vector<LineSeg2d> edges;
+    
+
+    Vec2d v1 = Vec2d(0,0);
+    Vec2d v2 = Vec2d(MATERIAL_WIDTH, 0);
+    Vec2d v3 = Vec2d(MATERIAL_WIDTH, MATERIAL_LENGTH);
+    Vec2d v4 = Vec2d(0, MATERIAL_LENGTH);
+
+    edges.emplace_back(v1, v2);
+    edges.emplace_back(v2, v3);
+    edges.emplace_back(v3, v4);
+    edges.emplace_back(v4, v1);
+
+    //TODO: I don't like any of the above, or the below.
+    //Here, we set the (constant) indices for edges
+    BOTTOM = 0;
+    RIGHT = 1;
+    TOP = 2;
+    LEFT = 3;
+    
+
+    auto radiusCompare = [](Slice *a, Slice *b) {
+        return a->bounding_ring.outer_radius >= b->bounding_ring.outer_radius;
+    };
+
+    //Sorted in order of decreasing radius
+    std::sort(in.begin(), in.end(), radiusCompare);
+
+    //Instead of what's done in the paper, we arbitrarily pick an initial
+    //configuration with the two smallest rings at opposite ends of the rectangle.
+    //This reduces the time complexity from O(n^10) to O(n^8), at the possible loss of some packing efficiency.
+    Slice* s1 = pop_back(in);
+    Slice* s2 = pop_back(in);
+    double r1 = s1->bounding_ring.outer_radius;
+    double r2 = s2->bounding_ring.outer_radius;
+    config.emplace_back(s1, s1->bounding_ring.move_to(Vec2d(r1, r1)));
+    config.emplace_back(s2, s2->bounding_ring.move_to(Vec2d(MATERIAL_WIDTH - r2, MATERIAL_LENGTH - r2)));
+    
+    //Generate initial placements
+    for (int i = 0; i < in.size(); i++) {
+        vector<Placement> temp = gen_placements(i, in[i]->bounding_ring.outer_radius, config, edges);
+        placements.insert(placements.end(), temp.begin(), temp.end());
+    }
+
+    auto addPlacement = [&in, &config, &placements, &edges](Placement accepted) {
+        Slice *s = in[accepted.index];
+        Ring ci = s->bounding_ring.move_to(accepted.pos);
+
+        config.emplace_back(s, ci);
+
+        //TODO: Make this cache-friendlier?
+
+        //Great, we modified "config", but now, we also need to modify both "placements"
+        //and "in". We'll swap in[p.index] to the back of in, then pop it. 
+        //Since we need to loop over "placements" anyway, we'll modify the indices as needed
+        vector<Placement> new_placements;
+        for (Placement p : placements) {
+            //Ignore placements involving ci
+            if (p.index == accepted.index) {
+                continue;
+            }
+            Ring p_bounds = in[p.index]->bounding_ring.move_to(p.pos);
+            //Ignore placements that would overlap ci
+            if (ci.intersects(p_bounds)) {
+                continue;
+            }
+            //Update d_min for all remaining placements
+            p.d_min = fmin(p.d_min, ci.distance_to(p_bounds));
+
+            if (p.index == in.size() - 1) {
+                //In this case, change the index to the index of the accepted.
+                p.index = accepted.index; 
+            }
+            new_placements.push_back(p);
+        }
+        placements.clear();
+        placements = new_placements;
+        //Now, perform the swap and pop on 'in'
+        in[accepted.index] = in[in.size() - 1];
+        in.pop_back();
+
+        //Okay, but we're still not done -- now we must add new placements involving ci.
+        for (int i = 0; i < in.size(); i++) {
+            Slice *s = in[i];
+            vector<Placement> temp = gen_placements_involving(ci, i, s->bounding_ring.outer_radius, 
+                                                              config, edges);
+            placements.insert(placements.end(), temp.begin(), temp.end());
+            temp.clear();
+        }
+    };
+
+    while (placements.size() > 0) {
+        //Stores the index into the corner placements with the maximum lambda
+        int max_index = 0;
+        int max_lambda = 0;
+        //Find the best corner placement
+        for (int i = 0; i < placements.size(); i++) {
+            double lambda = hole_degree(in[placements[i].index]->bounding_ring, placements[i].d_min);
+            if (lambda > max_lambda) {
+                max_index = i;
+                max_lambda = lambda;
+            }
+        }
+        addPlacement(placements[max_index]);
+    }
+}
+    
 
 int main(int argc, char** argv) {
     if (argc < 2) {
