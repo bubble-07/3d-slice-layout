@@ -3,6 +3,7 @@
 
 #include <string>
 #include <iostream>
+#include <unordered_map>
 #include <algorithm>
 #include <boost/filesystem.hpp>
 #include "math.h"
@@ -116,12 +117,54 @@ int Vec2d::rot_direction(const Vec2d &other) {
     return sgn(matr.det());
 }   
 
+class Vec3d {
+    public:
+    double x, y, z;
+    Vec3d(double x, double y, double z) {
+        this->x = x;
+        this->y = y;
+        this->z = z;
+    }
+    double dot(const Vec3d &other) {
+        return x * other.x + y * other.y + z * other.z;
+    }
+    double norm() {
+        return sqrt(x * x + y * y + z * z);
+    }
+    Vec3d normalize() {
+        return Vec3d(x, y, z) * (1.0 / norm());
+    }
+    const Vec3d operator*(double scaling) {
+        return Vec3d(x * scaling, y * scaling, z * scaling);
+    }
+    Vec3d cross(const Vec3d& o) {
+        return Vec3d(y*o.z - z * o.y, z * o.x - x * o.z, x * o.y - y * o.x);
+    }
+};
+Vec3d operator+(const Vec3d &one, const Vec3d &two) {
+    return Vec3d(one.x + two.x, one.y + two.y, one.z + two.z);
+}
+Vec3d operator*(double scaling, const Vec3d &one) {
+    return Vec3d(one.x * scaling, one.y * scaling, one.z * scaling);
+}
+Vec3d operator-(const Vec3d &one, const Vec3d &two) {
+    return one + (-1.0 * two);
+}
+
 class Shape {
     public:
-    virtual Vec2d closest_point_to(Vec2d p);
+    enum Type { RING, LINESEG };
+    Type type;
+    virtual Vec2d closest_point_to(Vec2d p) = 0;
     //Computes the minimal distance from the shape to a given point
     double distance_to(Vec2d p) {
         return closest_point_to(p).dist(p);
+    }
+    virtual bool operator==(Shape& other) {
+        return false;
+    }
+    bool operator!=(Shape& other) {
+        return !(operator==(other));
     }
 };
 
@@ -134,6 +177,7 @@ class Ring : public Shape {
         pos(pos_init.x, pos_init.y) { 
         this->inner_radius = inner_radius;
         this->outer_radius = outer_radius;
+        this->type = Shape::Type::RING;
     }
     Ring move_to(Vec2d p) {
         return Ring(p, inner_radius, outer_radius);
@@ -147,6 +191,15 @@ class Ring : public Shape {
     }
     using Shape::distance_to;
 
+    bool in(Vec2d test) {
+        double dist = pos.dist(test);
+        return dist >= inner_radius && dist <= outer_radius;
+    }
+    bool fuzz_in(Vec2d test) {
+        double dist = pos.dist(test);
+        return dist >= inner_radius - 0.001 && dist <= outer_radius + 0.001;
+    }
+
     bool strict_in(Vec2d test) {
         double dist = pos.dist(test);
         return dist > inner_radius && dist < outer_radius;
@@ -158,9 +211,13 @@ class Ring : public Shape {
         return (p - pos).normalize() * outer_radius;
     }
     
-    bool operator==(Ring other) {
-        return (pos == other.pos) && (inner_radius == other.inner_radius) && 
-            (outer_radius == other.outer_radius);
+    bool operator==(Shape& o) {
+        if (o.type == Shape::Type::RING) {
+            Ring& other = (Ring&) o;
+            return (pos == other.pos) && (inner_radius == other.inner_radius) && 
+                (outer_radius == other.outer_radius);
+        }
+        return false;
     }
 };
 //Line of the form ax+by=c
@@ -189,7 +246,9 @@ class LineSeg2d : public Shape {
     Vec2d pt1;
     Vec2d pt2;
     LineSeg2d(Vec2d pt1_init, Vec2d pt2_init) : pt1(pt1_init.x, pt1_init.y), 
-        pt2(pt2_init.x, pt2_init.y) {}
+        pt2(pt2_init.x, pt2_init.y) {
+        this->type = Shape::Type::LINESEG;     
+    }
     Vec2d perp() {
         return (pt1 - pt2).perp();
     }
@@ -217,10 +276,81 @@ class LineSeg2d : public Shape {
         }
         return closest;
     }
-    bool operator==(LineSeg2d other) {
-        return pt1 == other.pt1 && pt2 == other.pt2;
+    bool operator==(Shape& o) {
+        if (o.type == Shape::Type::LINESEG) {
+            LineSeg2d& other = (LineSeg2d&) o;
+            return pt1 == other.pt1 && pt2 == other.pt2;
+        }
+        return false;
     }
 };
+
+//TODO: support materials, as well
+void export_mesh(ostream& out, tinyobj::mesh_t m) {
+
+    auto comma_sep_triple = [](vector<float> in, int base) -> string {
+        return to_string(in[base]) + " " +
+               to_string(in[base + 1]) + " " +
+               to_string(in[base + 2]);
+    };
+    //The Obj format is STUPID and has indices starting from 1.
+    auto s = [](int in) -> string {
+        return to_string(in + 1) + "//" + to_string(in + 1);
+    };
+
+    //First, export all vertices
+    for (int i = 0; i < m.positions.size(); i += 3) {
+        out << "v " + comma_sep_triple(m.positions, i) + "\n";
+    }
+    //Then, export all vertex normals
+    for (int i = 0; i < m.normals.size(); i += 3) {
+        out << "vn " + comma_sep_triple(m.normals, i) + "\n";
+    }
+    //Export all faces (trivial)
+    for (int i = 0; i < m.normals.size(); i += 3) {
+        out << "f " + s(i) + " " + s(i + 1) + " " + s(i + 2) + "\n";
+    }
+}
+
+template<typename T> void append(vector<T> &one, vector<T> &two) {
+    one.insert(one.end(), two.begin(), two.end());
+}
+
+//Converts the silly index form to a raw sequential form
+tinyobj::mesh_t& standardize_mesh(tinyobj::mesh_t& in) {
+    vector<float> positions;
+    vector<float> normals;
+    vector<unsigned int> indices;
+    for (int i = 0; i < in.indices.size(); i++) {
+        positions.push_back(in.positions[3 * in.indices[i]]);
+        positions.push_back(in.positions[3 * in.indices[i] + 1]);
+        positions.push_back(in.positions[3 * in.indices[i] + 2]);
+        
+        normals.push_back(in.normals[3 * in.indices[i]]);
+        normals.push_back(in.normals[3 * in.indices[i] + 1]);
+        normals.push_back(in.normals[3 * in.indices[i] + 2]);
+
+        indices.push_back(i);
+    }
+    in.positions.clear();
+    in.normals.clear();
+    in.indices.clear();
+
+    in.positions = positions;
+    in.normals = normals;
+    in.indices = indices;
+
+    return in;
+}
+
+//Merges the second mesh's data onto the first's
+tinyobj::mesh_t& merge_meshes(tinyobj::mesh_t& first, tinyobj::mesh_t& second) {
+    append(first.positions, second.positions);
+    append(first.normals, second.normals);
+    //For now, we don't care about material ids, texcoords, indices
+    //TODO: Should we care?
+    return first;
+}
 
 class Slice { 
     public:
@@ -229,12 +359,94 @@ class Slice {
     //Position of mesh center relative to material
     Vec2d pos;
     //Mesh represented (there is a unique slice per mesh)
-    tinyobj::mesh_t &mesh;
-    Slice(tinyobj::mesh_t &src_mesh) : 
+    tinyobj::mesh_t mesh;
+    //Name of the slice (as a composite object)
+    string name;
+
+    Slice(string name, tinyobj::mesh_t src_mesh) : 
         bounding_ring(Vec2d(0,0),0,0),
         pos(0,0), mesh(src_mesh) {
     }
+
+    void export_obj(ostream& dest) {
+        dest << "s 1\n\no " + name << endl;
+        export_mesh(dest, mesh);
+    }
+
+    //Modifies the bounds of the slice,
+    //translating the mesh if necessary
+    void modifyBounds(Ring r) {
+        //In the mesh, the normals, texcoords, and indices remain the same
+        //The only thing that changes is the list of positions.
+        double dx = r.pos.x - bounding_ring.pos.x;
+        double dy = r.pos.y - bounding_ring.pos.y;
+
+        for (int i = 0; i < mesh.positions.size() / 3; i++) {
+            mesh.positions[3*i] += dx;
+            mesh.positions[3*i + 1] += dy;
+        }
+    }
+
+    //Determines if the given slice needs to be flipped (based on having all parts 2.5d-machined
+    //from the positive z axis.
+    bool needsFlip() {
+        Vec3d cumulative_normal = Vec3d(0, 0, 0);
+        //This method is based on computing an cumulative normal (weighted by surface area of triangles)
+        for (int i = 0; i < mesh.normals.size(); i += 3) {
+            Vec3d normal = Vec3d(mesh.normals[i], mesh.normals[i+1], mesh.normals[i+2]);
+            //Assumes the normals are paired with the triangles
+            //Get triangle vertices
+            int t1 = i;
+            int t2 = t1 + 3;
+            int t3 = t2 + 3;
+            Vec3d v1 = Vec3d(mesh.positions[t1], mesh.positions[t1 + 1], mesh.positions[t1 + 2]);
+            Vec3d v2 = Vec3d(mesh.positions[t2], mesh.positions[t2 + 1], mesh.positions[t2 + 2]);
+            Vec3d v3 = Vec3d(mesh.positions[t3], mesh.positions[t3 + 1], mesh.positions[t3 + 2]);
+            double area = (v1 - v2).cross(v3 - v2).norm() * 0.5;
+            cumulative_normal = cumulative_normal + area * normal;
+        }
+        return cumulative_normal.z < 0;
+    }
+
+    //Fits the mesh within the material bounds
+    void fitZ() {
+    //In the mesh, the normals + positions must flip.
+        //First, compute the maximum and minimum z values over mesh positions
+        double min_z = nan("");
+        double max_z = nan("");
+        for (int i = 0; i < mesh.positions.size() / 3; i++) {
+            double z = mesh.positions[3*i+2];
+            min_z = fmin(min_z, z);
+            max_z = fmax(max_z, z);
+        }
+        //TODO: throw an exception/return special value if it cannot be done
+        double dz = 0 - min_z;
+        for (int i = 0; i < mesh.positions.size() / 3; i++) {
+            mesh.positions[3*i + 2] += dz;
+        }
+    }
+
+    //Flips the slice (over z) , maintaining positioning
+    //in the material bounding box
+    void flip() {
+        double centerz = MATERIAL_HEIGHT / 2.0;
+        for (int i = 0; i < mesh.positions.size() / 3; i++) {
+            mesh.positions[3*i + 2] = centerz - mesh.positions[3*i + 2];
+        }
+        for (int i = 0; i < mesh.normals.size() / 3; i++) {
+            mesh.normals[3*i + 2] *= -1.0;
+        }
+    }
+    
+    //Flips and fits within the material as necesary
+    void flipAndFit() {
+        if (needsFlip()) {
+            flip();
+        }
+        fitZ();
+    }
 };
+
 
 void swap(vector<Vec2d> &v, int i, int j) {
     Vec2d tmp = v[i];
@@ -248,44 +460,138 @@ void permute(vector<Vec2d> &in) {
         swap(in, i, j);
     }
 }
-   
-Ring calc_circle_directly(vector<Vec2d> boundaryPoints) {
-    if (boundaryPoints.size() == 2) {
-        Vec2d center = 0.5 * (boundaryPoints[0] + boundaryPoints[1]);
-        return Ring(center, 0, center.dist(boundaryPoints[0]));
-    }
-    else if (boundaryPoints.size() == 3) {
-        LineSeg2d l1(boundaryPoints[0], boundaryPoints[1]);
-        LineSeg2d l2(boundaryPoints[1], boundaryPoints[2]);
-        Vec2d center = l1.bisector().intersect(l2.bisector());
-        return Ring(center, 0, center.dist(boundaryPoints[0]));
-    }
-    else {
-        cerr << "Internal Error: Boundary points vector of wrong size\n";
-        return Ring(Vec2d(0,0),0,0);
-    }
+
+//deletes (if you don't care about order)
+void del(vector<Vec2d> &in, int index) {
+    swap(in, index, in.size() - 1);
+    in.pop_back();
+}
+void del_two(vector<Vec2d> &in, int ind1, int ind2) {
+    swap(in, ind1, in.size() - 1);
+    swap(in, ind2, in.size() - 2);
+    in.pop_back();
+    in.pop_back();
 }
 
+Ring calc_circle_three(Vec2d one, Vec2d two, Vec2d three) {
+    LineSeg2d l1(one, two);
+    LineSeg2d l2(two, three);
+    Vec2d center = l1.bisector().intersect(l2.bisector());
+    return Ring(center, 0, center.dist(one));
+}
+
+Ring calc_circle_two(Vec2d one, Vec2d two) {
+    Vec2d center = 0.5 * (one + two);
+    return Ring(center, 0, center.dist(one));
+}
+
+//Indices indicate the indices of non-boundary points in the algorithm below
+class Candidate {
+    public:
+    Ring ring;
+    int index1 = -1;
+    int index2 = -1;
+    bool success;
+    Candidate() : ring(Vec2d(0,0),0,0) {
+        success = false;
+    }
+    Candidate(Ring r, int index) : ring(r.pos, r.inner_radius, r.outer_radius) {
+        success = false;
+        index1 = index;
+    }
+    Candidate(Ring r, int index1, int index2) : ring(r.pos, r.inner_radius, r.outer_radius) {
+        success = false;
+        this->index1 = index1;
+        this->index2 = index2;
+    }
+};
+
 //Citation: Emo Welzl
-//and http://www.sunshine2k.de/coding/java/Welzl/Welzl.html
-Ring bounding_circle_helper(vector<Vec2d> planePoints, vector<Vec2d> boundaryPoints) {
-    if (planePoints.size() + boundaryPoints.size() <= 3) {
-        vector<Vec2d> combined = vector<Vec2d>(planePoints);
-        combined.insert(combined.end(), boundaryPoints.begin(), boundaryPoints.end());
-        return calc_circle_directly(combined);
+Ring bounding_circle(vector<Vec2d> planePoints) {
+    //Special case: only one point
+    if (planePoints.size() == 1) {
+        return Ring(planePoints[0], 0, 0);
     }
-    else {
-        permute(planePoints);
-        Vec2d p = pop_back(planePoints);
-        Ring r = bounding_circle_helper(planePoints, boundaryPoints);
-        if (!r.strict_in(p)) {
-            vector<Vec2d> enlargedBoundary = vector<Vec2d>(boundaryPoints);
-            enlargedBoundary.push_back(p);
-            r = bounding_circle_helper(planePoints, enlargedBoundary);
-            enlargedBoundary.clear();
+    permute(planePoints);
+
+    vector<Vec2d> support;
+    Vec2d v1 = planePoints[0];
+    Vec2d v2 = planePoints[1];
+    support.push_back(v1);
+    support.push_back(v2);
+    Ring result = calc_circle_two(v1, v2);
+
+    auto pick_better = [&support](Candidate current, Candidate in) -> Candidate {
+        if (current.success && current.ring.outer_radius <= in.ring.outer_radius) {
+            return current;
         }
-        return r;
+        else {
+            if (!in.ring.fuzz_in(support[in.index1]) ||
+                 (in.index2 != -1 && !in.ring.fuzz_in(support[in.index2]))) {
+                return current;
+            }
+            return in;
+        }
+    };
+    auto update = [&support, &result](Candidate in) {
+        if (in.index2 == -1) {
+            del(support, in.index1);
+        }
+        else {
+            del_two(support, in.index1, in.index2);
+        }
+        result = in.ring;
+    };
+    auto circle_two = [&support](int i) -> Ring {
+        return calc_circle_two(support[i], support[support.size() - 1]);
+    };
+    auto circle_three = [&support](int i, int j) -> Ring {
+        return calc_circle_three(support[i], support[j], support[support.size() - 1]);
+    };
+    bool finished = false;
+    
+    while (!finished) {
+        bool restart = false;
+        for (int i = 0; i < planePoints.size() && !restart; i++) {
+            if (!result.fuzz_in(planePoints[i])) {
+                //Uh-oh. New support points!
+                support.push_back(planePoints[i]);
+                Candidate test = Candidate();
+                switch (support.size()) {
+                    case 2:
+                        result = calc_circle_two(support[0], support[1]);
+                        break;
+                    case 3:
+                        //First, try all options with 2 supporting points
+                        test = pick_better(test, Candidate(circle_two(0), 1));
+                        test = pick_better(test, Candidate(circle_two(1), 0));
+                        if (test.success) {
+                            update(test);
+                            break;
+                        }
+                        //Didn't work? Must have 3 supporting points.
+                        result = calc_circle_three(support[0], support[1], support[2]);
+                        break;
+                    case 4:
+                        //Try all 2-permutations.
+                        test = pick_better(test, Candidate(circle_two(0), 1, 2));
+                        test = pick_better(test, Candidate(circle_two(1), 0, 2));
+                        test = pick_better(test, Candidate(circle_two(2), 0, 1));
+                        //Try all 3-permutations.
+                        test = pick_better(test, Candidate(circle_three(0, 1), 2));
+                        test = pick_better(test, Candidate(circle_three(1, 2), 0));
+                        test = pick_better(test, Candidate(circle_three(0, 2), 1));
+                        update(test);
+                        break;
+                }
+                restart = true;
+            }
+        }
+        if (!restart) {
+            finished = true;
+        }
     }
+    return result;
 }
 
 //Computes whether or not a given point intersects any 2d cross-section of the slice
@@ -345,7 +651,7 @@ void compute_bounds(Slice *slice) {
     for (int i = 0; i < slice->mesh.positions.size() / 3; i++) {
         points.push_back(Vec2d(slice->mesh.positions[3*i+0], slice->mesh.positions[3*i+1]));
     }
-    slice->bounding_ring = bounding_circle_helper(points, vector<Vec2d>());
+    slice->bounding_ring = bounding_circle(points);
 
     vector<LineSeg2d> lineSegs = get_line_segs(slice);
 
@@ -353,20 +659,18 @@ void compute_bounds(Slice *slice) {
 }
 
 //TODO: Ensure d_min kept with the list of corner placements to avoid re-calculation.
-double min_dist(Ring c, Shape u, Shape v, vector<pair<Slice*, Ring>> &cfg, vector<LineSeg2d> &edges) {
+double min_dist(Ring c, Shape &u, Shape &v, vector<pair<Slice*, Ring>> &cfg, vector<LineSeg2d> &edges) {
     //d_min will hold the distance from the ring's center to the closest shape in the
     //configuration (including sides), but exclude u and v
     double d_min = nan("");
     for (auto l : edges) {
-        //TODO: How to test for equality here?
-        if (true /*(not (l == u)) && (not (l == v)) */) {
+        if (l != u && l != v) {
             d_min = fmin(d_min, l.distance_to(c.pos));
         }
     }
     for (pair<Slice*, Ring> p : cfg) {
         Ring r = p.second;
-        //TODO: How to test for equality here?
-        if (true /*(not (r == u)) && (not (r == v)) */) {
+        if (r != u && r != v) {
             d_min = fmin(d_min, r.distance_to(c.pos));
         }
     }
@@ -391,7 +695,7 @@ class Placement {
 };
 
 bool eps_equals(double a, double b) {
-    return (a - b) < 0.001;
+    return (fabs(a - b)) < 0.0001;
 }
 
 vector<double> quad_solve(double a, double b, double c) {
@@ -427,6 +731,9 @@ vector<Vec2d> get_tangent_circle_center(Ring one, Ring two, double r) {
     double y2 = two.pos.y;
     double ydiff = y2 - y1;
     if (eps_equals(ydiff, 0)) {
+        if (eps_equals(x1 - x2, 0)) {
+            return vector<Vec2d>();
+        }
         //Rotate the whole plane 90 degrees, and try again.
         return perp(
         get_tangent_circle_center(Ring(one.pos.antiperp(), one.inner_radius, one.outer_radius),
@@ -461,12 +768,12 @@ bool placement_valid(Vec2d pos, double r, vector<pair<Slice*, Ring>> &cfg) {
     return true;
 }
 
-Placement pos_to_placement(int index, Vec2d p, double r, Shape u, Shape v, 
+Placement pos_to_placement(int index, Vec2d p, double r, Shape &u, Shape &v, 
                            vector<pair<Slice*, Ring>> &cfg, vector<LineSeg2d> &edges) {
     return Placement(index, p, min_dist(Ring(p, 0, r), u, v, cfg, edges));
 }
 
-void add_center(int index, Vec2d center, double r, Shape one, Shape two, 
+void add_center(int index, Vec2d center, double r, Shape &one, Shape &two, 
         vector<pair<Slice*, Ring>> &cfg, vector<LineSeg2d> &edges, vector<Placement> &result) {
     if (placement_valid(center, r, cfg)) {
         result.push_back(pos_to_placement(index, center, r, one, two, cfg, edges));
@@ -480,6 +787,7 @@ vector<Vec2d> get_tangent_circle_center_horiz(Ring one, double y_h, double r) {
     vector<Vec2d> result;
     result.emplace_back(one.pos.x + delta_x, y_h + r);
     result.emplace_back(one.pos.x - delta_x, y_h + r);
+    return result;
 }
 //Same as before. TODO: Make this not as dumb
 vector<Vec2d> get_tangent_circle_center_vert(Ring one, double x_h, double r) {
@@ -493,7 +801,7 @@ vector<Placement> gen_placements_involving(Ring one, int index, double r, vector
                                            vector<LineSeg2d> &edges) {
     vector<Placement> result;
     
-    auto add_centers = [&index, &cfg, &r, &edges, &result](vector<Vec2d> centers, Shape one, Shape two) {
+    auto add_centers = [&index, &cfg, &r, &edges, &result](vector<Vec2d> centers, Shape &one, Shape &two) {
         for (Vec2d center : centers) { add_center(index, center, r, one, two, cfg, edges, result); }
     };
 
@@ -523,7 +831,7 @@ vector<Placement> gen_placements_involving(Ring one, int index, double r, vector
 vector<Placement> gen_placements(int index, double r, vector<pair<Slice*, Ring>> &cfg, vector<LineSeg2d> &edges) {
     vector<Placement> result;
 
-    auto add = [&index, &r, &cfg, &edges, &result](Vec2d center, Shape one, Shape two) {
+    auto add = [&index, &r, &cfg, &edges, &result](Vec2d center, Shape &one, Shape &two) {
         add_center(index, center, r, one, two, cfg, edges, result);
     };
 
@@ -654,10 +962,24 @@ vector<pair<Slice*, Ring>> ring_pack(vector<Slice*> in) {
         }
         addPlacement(placements[max_index]);
     }
+    return config;
+}
+
+//Gets a slice number from a name of the form "Slice_slice-1_Part_0000_"... 
+//(As generated by 123D Make)
+int getSliceNum(string name) {
+    string numStart = name.substr(12);
+    int i;
+    std::istringstream(numStart) >> i;
+    return i;
+}
+
+string getSliceName(string filename, string nameinfile) {
+    return filename + "_" + to_string(getSliceNum(nameinfile));
 }
     
 
-int main(int argc, char** argv) {
+int main(int argc, char* argv[]) {
     if (argc < 2) {
         cout << "Usage: 3d-slice-layout path\n";
         return 1;
@@ -668,10 +990,9 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    //For now, don't even bother to load materials
-    //TODO: should we do this?
-    vector<tinyobj::shape_t> shapes;
-    vector<tinyobj::material_t> materials;
+    //We need to bunch together meshes belonging to the same slice in the same file
+    //This is a dumb way to do it.
+    unordered_map<string, vector<tinyobj::shape_t>> shapes;
 
     for (directory_entry& entry : directory_iterator(source_dir)) {
         if (entry.path().extension() == ".obj") {
@@ -685,9 +1006,50 @@ int main(int argc, char** argv) {
             if (!ret) {
                 return 1;
             }
-
-            shapes.insert(shapes.end(), temp_shapes.begin(), temp_shapes.end());
+            string filename = entry.path().filename().string();
+            for (tinyobj::shape_t &shape : temp_shapes) {
+                string newName = getSliceName(filename, shape.name);
+                shape.name = newName;
+                if (shapes.count(newName) == 0) {
+                    shapes[newName] = vector<tinyobj::shape_t>();
+                }
+                shapes[newName].push_back(shape);
+            }
         }
+    }
+
+    //Now, iterate over all of the buckets to get a final list of Slices
+    vector<Slice*> slices = vector<Slice*>();
+    for (auto kv : shapes) {
+        string name = kv.first;
+        vector<tinyobj::shape_t> slice_shapes = kv.second;
+        tinyobj::mesh_t combined_mesh = standardize_mesh(slice_shapes[0].mesh);
+        for (int i = 1; i < slice_shapes.size(); i++) {
+            merge_meshes(combined_mesh, standardize_mesh(slice_shapes[i].mesh)); 
+        }
+        if (combined_mesh.positions.size() == 0) {
+            continue;
+        }
+        slices.push_back(new Slice(name, combined_mesh));
+    }
+
+    //Compute the bounds of each material, and flip and fit each one within the material
+    for (Slice* slice : slices) {
+        slice->flipAndFit();
+        compute_bounds(slice);
+    }
+
+    vector<pair<Slice*, Ring>> packed = ring_pack(slices);
+    //Now, for each slice, translate the underlying mesh.
+    for (auto sr : packed) {
+        sr.first->modifyBounds(sr.second);
+    }
+
+    cout << nounitbuf;
+    cout.sync_with_stdio(false);
+    //Great. Now everything should be fitted, and in the right position. Write .obj file format to stdout.
+    for (Slice* slice : slices) {
+        slice->export_obj(cout);
     }
 
     return 0;
