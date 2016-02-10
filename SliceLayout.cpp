@@ -783,10 +783,12 @@ void add_center(int index, Vec2d center, double r, Shape &one, Shape &two,
 
 //Gets the center of a circle tangent to a circle and a horizontal line, with radius r
 vector<Vec2d> get_tangent_circle_center_horiz(Ring one, double y_h, double r) {
-    double delta_x = sqrt(sq(one.outer_radius + r) - sq(y_h = r - one.pos.y));
+    double delta_x = 2 * sqrt(one.outer_radius * r);
     vector<Vec2d> result;
     result.emplace_back(one.pos.x + delta_x, y_h + r);
     result.emplace_back(one.pos.x - delta_x, y_h + r);
+    result.emplace_back(one.pos.x + delta_x, y_h - r);
+    result.emplace_back(one.pos.x - delta_x, y_h - r);
     return result;
 }
 //Same as before. TODO: Make this not as dumb
@@ -802,7 +804,10 @@ vector<Placement> gen_placements_involving(Ring one, int index, double r, vector
     vector<Placement> result;
     
     auto add_centers = [&index, &cfg, &r, &edges, &result](vector<Vec2d> centers, Shape &one, Shape &two) {
-        for (Vec2d center : centers) { add_center(index, center, r, one, two, cfg, edges, result); }
+        for (Vec2d center : centers) { 
+            add_center(index, center, r, one, two, cfg, edges, result); 
+            //cout << "Placement at " << center.x << " " <<  center.y << "\n";
+        }
     };
 
     //Handle circle-circle case
@@ -814,10 +819,12 @@ vector<Placement> gen_placements_involving(Ring one, int index, double r, vector
             continue;
         }
         else {
+            //cout << "CIRCLES" << "\n";
             add_centers(get_tangent_circle_center(one, two, r), one, two);
         }
     }
     
+    //cout << "CIRCLE-LINES" << "\n";
     //Now, circle-line case
     add_centers(get_tangent_circle_center_horiz(one, 0, r), one, edges[BOTTOM]);
     add_centers(get_tangent_circle_center_vert(one, 0, r), one, edges[LEFT]);
@@ -981,13 +988,17 @@ string getSliceName(string filename, string nameinfile) {
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
-        cout << "Usage: 3d-slice-layout path\n";
+        cout << "Usage: 3d-slice-layout sourcepath (optional: destpath) \n";
         return 1;
     }
     path source_dir(argv[1]);
     if (!exists(source_dir) || !is_directory(source_dir)) {
         cout << "The path input must be a directory!\n";
         return 1;
+    }
+    ostream& deststream = cout;
+    if (argc == 3) {
+        deststream = ofstream(argv[2], std::ofstream::out);
     }
 
     //We need to bunch together meshes belonging to the same slice in the same file
@@ -1049,7 +1060,11 @@ int main(int argc, char* argv[]) {
     cout.sync_with_stdio(false);
     //Great. Now everything should be fitted, and in the right position. Write .obj file format to stdout.
     for (Slice* slice : slices) {
-        slice->export_obj(cout);
+        slice->export_obj(deststream);
+    }
+
+    if (argc == 3) {
+        deststream.close();
     }
 
     return 0;
