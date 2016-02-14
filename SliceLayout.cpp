@@ -280,9 +280,7 @@ class Line2d {
 
     Vec2d intersect(Line2d other) {
         Mat2d m(a, b, other.a, other.b);
-        //m = m.inverse();
         Vec2d k(c, other.c);
-        //Vec2d result = m*k;
         Vec2d result = m.linsolven(k, 4);
         return result;
     }
@@ -552,6 +550,7 @@ Ring calc_circle_three(Vec2d one, Vec2d two, Vec2d three) {
     LineSeg2d l1(one, two);
     LineSeg2d l2(two, three);
     Vec2d center = l1.bisector().intersect(l2.bisector());
+
     return Ring(center, 0, center.dist(one));
 }
 
@@ -624,6 +623,19 @@ Ring bounding_circle(vector<Vec2d> planePoints) {
     auto circle_three = [&support](int i, int j) -> Ring {
         return calc_circle_three(support[i], support[j], support[support.size() - 1]);
     };
+
+    //Create a default option in case things go bad.
+    Vec2d avg = Vec2d(0,0);
+    for (Vec2d &v : planePoints) {
+        avg = avg + v;
+    }
+    avg = avg * (1.0 / planePoints.size());
+    double max_dist = 0;
+    for (Vec2d &v : planePoints) {
+        max_dist = fmax(max_dist, v.dist(avg));
+    }
+    Ring default_ring = Ring(avg, 0, max_dist);
+
     bool finished = false;
     
     while (!finished) {
@@ -666,6 +678,9 @@ Ring bounding_circle(vector<Vec2d> planePoints) {
         if (!restart) {
             finished = true;
         }
+    }
+    if (default_ring.outer_radius < result.outer_radius) {
+        return default_ring;
     }
     return result;
 }
@@ -792,7 +807,6 @@ vector<Vec2d> perp(vector<Vec2d> in) {
 }
 
 vector<Vec2d> get_tangent_circle_center(Ring one, Ring two, double r) {
-    cerr << one.to_string() + two.to_string() + "," + to_string(r) << endl;
     Vec2d c = two.pos - one.pos;
     if (eps_equals(c.x, 0) && eps_equals(c.y, 0)) {
         return vector<Vec2d>();
@@ -804,7 +818,6 @@ vector<Vec2d> get_tangent_circle_center(Ring one, Ring two, double r) {
     double r2 = two.outer_radius;
     double cos = (sq(r + r1) - sq(r + r2) + sq(d)) / (2.0 * d * (r1 + r));
     double sin = sqrt(1 - sq(cos));
-    cerr << "cos = " << cos << " sin = " << sin << " d = " << d << endl;
     Mat2d rotMat1 = Mat2d(cos, sin, -sin, cos);
     Mat2d rotMat2 = Mat2d(cos, -sin, sin, cos);
     c = c * (r1 + r);
@@ -813,81 +826,6 @@ vector<Vec2d> get_tangent_circle_center(Ring one, Ring two, double r) {
     result.push_back(one.pos + rotMat2 * c);
     return result;
 }
-
-/*
-//Gets the center (x) of a circle tangent to the two given ones, with radius r.
-vector<Vec2d> get_tangent_circle_center(Ring one, Ring two, double r) {
-    cerr << one.to_string() + two.to_string() + "," + to_string(r) << endl;
-    Vec2d x1 = one.pos;
-    Vec2d x2 = two.pos;
-    double r1 = one.outer_radius;
-    double r2 = two.outer_radius;
-    //First, compute the line the tangent circle must lie on, of the form <X, c> = b
-    Vec2d c = x1 - x2;
-    if (eps_equals(c.x, 0) && eps_equals(c.y, 0)) {
-        //Special case: dealing with the same ring
-        return vector<Vec2d>();
-    }
-
-    double b = (x1.dot(x1) - x2.dot(x2) + sq(r + r2) - sq(r + r1)) / 2.0;
-    cerr << to_string(b) + ",";
-    Line2d l(c, b);
-    //Now, compute the closest point to x1 on the line and the distance of x1 to the line
-    Vec2d p = l.closest_point_to(x1);
-    cerr << to_string(p.x) + "," + to_string(p.y) << endl;
-    double d = x1.dist(p);
-    //Then p, x1, x defines a right triangle with side lengths d, h, r + r1
-    double h = sqrt(sq(r + r1) - sq(d));
-    Vec2d t = l.tangent().normalize();
-    vector<Vec2d> result;
-    result.push_back(p + t*h);
-    result.push_back(p - t*h);
-    return result;
-}
-*/
-
-/*
-//Gets the center of a circle tangent to the two given ones, with radius r.
-//To do this, it uses a (horribly ugly) series of formulas.
-vector<Vec2d> get_tangent_circle_center(Ring one, Ring two, double r) {
-    cerr << one.to_string() + two.to_string() + "," + to_string(r) << endl;
-    double r1 = one.outer_radius;
-    double r2 = two.outer_radius;
-    double x1 = one.pos.x;
-    double x2 = two.pos.x;
-    double y1 = one.pos.y;
-    double y2 = two.pos.y;
-    double ydiff = y2 - y1;
-    
-    if (eps_equals(ydiff, 0)) {
-        if (eps_equals(x1 - x2, 0)) {
-            return vector<Vec2d>();
-        }
-    }
-   if (fabs(ydiff) <= fabs(x1 - x2)) {
-        //Rotate the whole plane 90 degrees, and try again.
-        return perp(
-        get_tangent_circle_center(Ring(one.pos.antiperp(), one.inner_radius, one.outer_radius),
-                                  Ring(two.pos.antiperp(), two.inner_radius, two.outer_radius),
-                                  r));
-    }
-    //From subtracting the two "tangency" equations, we get a linear
-    //equation of the form y = mx + k
-    double m = (x1 - x2) / ydiff;
-    double k = ((2*r+r1+r2)*(r1-r2) + x2*x2 + y2*y2 - x1*x1 - y1*y1) / (2.0 * ydiff);
-    //Now, we substitute into (x-x1)^2+(y-y1)^2=(r+r1)^2 to get a quadratic equation in x
-    double a = 1 + m*m;
-    double b = 2*(m*(k-y1)-x1);
-    double c = (x1*x1 + sq(k-y1) - sq(r+r1));
-    vector<double> x = quad_solve(a, b, c);
-    vector<Vec2d> result(x.size(), Vec2d(0,0));
-    std::transform(x.begin(), x.end(), result.begin(), [&m, &k](double x) { return Vec2d(x, m*x + k); });
-    for (Vec2d &v : result) {
-        cerr << "Points: " + to_string(v.x) + "," + to_string(v.y) << endl;
-    }
-    return result;
-}
-*/
 
 bool placement_valid(Vec2d pos, double r, vector<pair<Slice*, Ring>> &cfg) {
     if (pos.x + r > MATERIAL_WIDTH || pos.x - r < 0 ||
@@ -918,7 +856,16 @@ void add_center(int index, Vec2d center, double r, Shape &one, Shape &two,
 
 //Gets the center of a circle tangent to a circle and a horizontal line, with radius r
 vector<Vec2d> get_tangent_circle_center_horiz(Ring one, double y_h, double r) {
+    //Case 1: both circles are right up against the line
     double delta_x = 2 * sqrt(one.outer_radius * r);
+    if (fabs(one.pos.y - y_h) > one.outer_radius) {
+        //Case 2: the circle we're placing is not up against the line
+        delta_x = sqrt( sq(r + one.outer_radius) - sq(fabs(one.pos.y - y_h) - r));
+        if (isnan(delta_x)) {
+            return vector<Vec2d>();
+        }
+    }
+
     vector<Vec2d> result;
     result.emplace_back(one.pos.x + delta_x, y_h + r);
     result.emplace_back(one.pos.x - delta_x, y_h + r);
@@ -1047,7 +994,6 @@ vector<pair<Slice*, Ring>> ring_pack(vector<Slice*> in) {
         Slice *s = in[accepted.index];
         Ring ci = s->bounding_ring.move_to(accepted.pos);
 
-        cerr << "Circle center: " + to_string(ci.pos.x) + "," + to_string(ci.pos.y) << endl;
         config.emplace_back(s, ci);
 
         //TODO: Make this cache-friendlier?
@@ -1187,7 +1133,6 @@ int main(int argc, char* argv[]) {
     for (Slice* slice : slices) {
         slice->flipAndFit();
         compute_bounds(slice);
-        cerr << slice->bounding_ring.to_string() << endl;
     }
 
     vector<pair<Slice*, Ring>> packed = ring_pack(slices);
