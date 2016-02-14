@@ -4,6 +4,7 @@
 #include <string>
 #include <iostream>
 #include <unordered_map>
+#include <unordered_set>
 #include <algorithm>
 #include <boost/filesystem.hpp>
 #include "math.h"
@@ -563,7 +564,7 @@ void permute(vector<Vec2d> &in) {
 }
 
 //deletes (if you don't care about order)
-void del(vector<Vec2d> &in, int index) {
+template<typename T> void del(vector<T> &in, int index) {
     swap(in, index, in.size() - 1);
     in.pop_back();
 }
@@ -572,6 +573,14 @@ void del_two(vector<Vec2d> &in, int ind1, int ind2) {
     swap(in, ind2, in.size() - 2);
     in.pop_back();
     in.pop_back();
+}
+template<typename T> void del_all(vector<T> &in, vector<int> indices) {
+    for (int i = 0; i < indices.size(); i++) {
+        swap(in, indices[i], in.size() - 1 - i);
+    }
+    for (int i = 0; i < indices.size(); i++) {
+        in.pop_back();
+    }
 }
 
 Ring calc_circle_two(Vec2d one, Vec2d two) {
@@ -1029,16 +1038,49 @@ vector<pair<Slice*, Ring>> ring_pack(vector<Slice*> in) {
 
         config.emplace_back(s, ci);
 
-        //TODO: Make this cache-friendlier?
+        //Indices that were packed in this iteration.
+        unordered_set<int> to_delete;
+        vector<int> to_delete_vector;
+        to_delete.insert(accepted.index);
+        to_delete_vector.push_back(accepted.index);
+        
+        //Pack rings inside of rings inside of rings... etc. for as long as possible.
+        double fit_radius = ci.inner_radius;
+        while (true) { 
+
+            int fit_index = in.size();
+            double max_radius = 0.0;
+            //TODO: Do this in a not-dumb way. Tricky, because "in" does not stay sorted!
+            for (int i = 0; i < in.size(); i++) {
+                double r = in[i]->bounding_ring.outer_radius;
+                if (to_delete.count(i) < 1 && r <= fit_radius && r >= max_radius) {
+                    max_radius = r;
+                    fit_index = i;
+                    break;
+                }
+            }
+            if (fit_index != in.size()) {
+                //Cool -- we got a ring to place inside!
+                Slice *inner = in[fit_index];
+                Ring inner_ring = inner->bounding_ring.move_to(accepted.pos);
+                fit_radius = inner_ring.inner_radius;
+                config.emplace_back(inner, inner_ring);
+                to_delete.insert(fit_index);
+                to_delete_vector.push_back(fit_index);
+            }
+            else {
+                break;
+            }
+        }
+
 
         //Great, we modified "config", but now, we also need to modify both "placements"
         //and "in". We'll swap in[p.index] to the back of in, then pop it. 
         //Since we need to loop over "placements" anyway, we'll modify the indices as needed
         vector<Placement> new_placements;
         for (Placement p : placements) {
-            //TODO: Change to ignore placements involving interior rings, too.
-            //Ignore placements involving ci
-            if (p.index == accepted.index) {
+            //Ignore placements involving indices that have just been placed and will be deleted.
+            if (to_delete.count(p.index) > 0) {
                 continue;
             }
             Ring p_bounds = in[p.index]->bounding_ring.move_to(p.pos);
@@ -1049,19 +1091,28 @@ vector<pair<Slice*, Ring>> ring_pack(vector<Slice*> in) {
             //Update d_min for all remaining placements
             p.d_min = fmin(p.d_min, ci.distance_to(p_bounds));
 
+            //If the index we're going to add involves something that will be
+            //swapped in the process of deleting indices, do some index magic.
+            if (p.index >= in.size() - to_delete_vector.size()) {
+                int pos_from_back = (in.size() - 1) - p.index;
+                p.index = to_delete_vector[pos_from_back];
+            }
+
+            /*
+            //TODO: Need to do this ugly thing for deletes of other things, too!
             if (p.index == in.size() - 1) {
                 //In this case, change the index to the index of the accepted.
                 p.index = accepted.index; 
             }
+            */
             new_placements.push_back(p);
         }
         placements.clear();
         placements = new_placements;
-        //Now, perform the swap and pop on 'in'
-        in[accepted.index] = in[in.size() - 1];
-        in.pop_back();
+        //Now, delete all the things in "to_delete"
+        del_all(in, to_delete_vector);
 
-        //Okay, but we're still not done -- now we must add new placements involving ci.
+        //Okay, but we're still not done -- now we must add new placements involving ci (why not the ones packed in rings? Can't!)
         for (int i = 0; i < in.size(); i++) {
             Slice *s = in[i];
             vector<Placement> temp = gen_placements_involving(ci, i, s->bounding_ring.outer_radius, 
