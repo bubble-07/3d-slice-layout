@@ -17,6 +17,7 @@ double INCHES_TO_MM = 25.4;
 double MATERIAL_WIDTH = 96.0 * INCHES_TO_MM;
 double MATERIAL_LENGTH = 48.0 * INCHES_TO_MM;
 double MATERIAL_HEIGHT = (23.0 / 32.0) * INCHES_TO_MM; 
+double PI = 3.1415926535;
 
 //To be set later
 int BOTTOM = 0;
@@ -58,6 +59,9 @@ class Vec2d {
         this->x = x;
         this->y = y;
     }
+    string to_string() {
+        return "[" + std::to_string(x) + "," + std::to_string(y) + "]";
+    }
     double dot(const Vec2d &other) {
         return x * other.x + y * other.y;
     }
@@ -69,6 +73,9 @@ class Vec2d {
     }
     Vec2d normalize() {
         return Vec2d(x, y) * (1.0 / norm());
+    }
+    double angle_to(Vec2d other) {
+        return acos(dot(other) / (norm() * other.norm()));
     }
     //Returns CCW rotated vector by 90 degrees
     Vec2d perp() {
@@ -209,6 +216,29 @@ class Shape {
     }
 };
 
+class BBox2d {
+    public:
+    double min_x;
+    double max_x;
+    double min_y;
+    double max_y;
+    BBox2d(Vec2d one, Vec2d two) {
+        min_x = fmin(one.x, two.x);
+        max_x = fmax(one.x, two.x);
+        min_y = fmin(one.y, two.y);
+        max_y = fmax(one.y, two.y);
+    }
+    void enlarge(Vec2d in) {
+       min_x = fmin(min_x, in.x);
+       max_x = fmax(max_x, in.x);
+       min_y = fmin(min_y, in.y);
+       max_y = fmax(max_y, in.y);
+    }
+    bool in(Vec2d test) {
+        return (test.x >= min_x && test.x <= max_x && test.y >= min_y && test.y <= max_y);
+    }
+};
+
 class Ring : public Shape { 
     public:
     Vec2d pos;
@@ -310,6 +340,9 @@ class LineSeg2d : public Shape {
     LineSeg2d(Vec2d pt1_init, Vec2d pt2_init) : pt1(pt1_init.x, pt1_init.y), 
         pt2(pt2_init.x, pt2_init.y) {
         this->type = Shape::Type::LINESEG;     
+    }
+    string to_string() {
+        return "LineSeg(" + pt1.to_string() + "," + pt2.to_string() + ")";
     }
     bool parallel(LineSeg2d other) {
         Vec2d t = other.tangent();
@@ -688,19 +721,17 @@ Ring bounding_circle(vector<Vec2d> planePoints) {
 //Computes whether or not a given point intersects any 2d cross-section of the slice
 //Assumes that the vector of lines passed is in triples of triangle lines
 bool intersects(Vec2d p, vector<LineSeg2d> &lines) {
-    auto getDir = [](Vec2d p, LineSeg2d l) -> int {
-        return l.tangent().rot_direction(p - l.pt1);
-    };
-
     for (int i = 0; i < lines.size() / 3; i++) {
         LineSeg2d l1 = lines[3*i];
         LineSeg2d l2 = lines[3*i+1];
         LineSeg2d l3 = lines[3*i+2];
-        //Technique drawn from http://www.blackpawn.com/texts/pointinpoly/
-        int rot_direction = getDir(p, l1);
-        if (rot_direction == getDir(p, l2) && rot_direction == getDir(p, l3)) {
-            //If the vector from a triangle vertex to a point lies on the same
-            //side of every line, it must be in the triangle.
+        
+        Vec2d v1 = l1.pt1 - p;
+        Vec2d v2 = l2.pt1 - p;
+        Vec2d v3 = l3.pt1 - p;
+
+        double theta = v1.angle_to(v2) + v2.angle_to(v3) + v3.angle_to(v1);
+        if (eps_equals(theta, 2*PI)) {
             return true;
         }
     }
@@ -715,11 +746,12 @@ void get_bounding_ring(Slice* slice, vector<LineSeg2d> &lines) {
         //Must NOT be a ring, do nothing
         return;
     }
-    double inner = 0.0;
+    double inner = nan("");
     for (auto l : lines) {
-        inner = fmax(inner, l.distance_to(center));
+        inner = fmin(inner, l.distance_to(center));
     }
     slice->bounding_ring.inner_radius = inner;
+    cerr << "Inner radius: " << inner << endl;
 }
 
 //Gets all 2d line segments of triangles in an order that respects triangles.
@@ -749,7 +781,6 @@ void compute_bounds(Slice *slice) {
     get_bounding_ring(slice, lineSegs);
 }
 
-//TODO: Ensure d_min kept with the list of corner placements to avoid re-calculation.
 double min_dist(Ring c, Shape &u, Shape &v, vector<pair<Slice*, Ring>> &cfg, vector<LineSeg2d> &edges) {
     //d_min will hold the distance from the ring's center to the closest shape in the
     //configuration (including sides), but exclude u and v
@@ -990,6 +1021,8 @@ vector<pair<Slice*, Ring>> ring_pack(vector<Slice*> in) {
         placements.insert(placements.end(), temp.begin(), temp.end());
     }
 
+    //TODO: Every time a placement is added, if the accepted one is a ring, put something inside of it.
+    //Completely ignore updating d_min for new placements against the interior ring.
     auto addPlacement = [&in, &config, &placements, &edges](Placement accepted) {
         Slice *s = in[accepted.index];
         Ring ci = s->bounding_ring.move_to(accepted.pos);
@@ -1003,6 +1036,7 @@ vector<pair<Slice*, Ring>> ring_pack(vector<Slice*> in) {
         //Since we need to loop over "placements" anyway, we'll modify the indices as needed
         vector<Placement> new_placements;
         for (Placement p : placements) {
+            //TODO: Change to ignore placements involving interior rings, too.
             //Ignore placements involving ci
             if (p.index == accepted.index) {
                 continue;
@@ -1141,9 +1175,12 @@ int main(int argc, char* argv[]) {
     cout << "<svg xmlns = \"http://www.w3.org/2000/svg\" verstion=\"1.1\">" << endl;
     for (auto sr : packed) {
         Vec2d c = sr.second.pos;
-        //Write out the circle to SVG
+        //Write out the ring to SVG
         cout << "<circle cx=\"" << to_string(c.x) << "\" cy=\"" << to_string(c.y) << "\" r=\"";
         cout << to_string(sr.second.outer_radius) << "\" fill=\"orange\" />" << endl;
+
+        cout << "<circle cx=\"" << to_string(c.x) << "\" cy=\"" << to_string(c.y) << "\" r=\"";
+        cout << to_string(sr.second.inner_radius) << "\" fill=\"white\" />" << endl;
         
         //Write out labels to SVG
         cout << "<text x=\"" << to_string(c.x - sr.second.outer_radius);
