@@ -24,6 +24,9 @@ int TOP = 0;
 int LEFT = 0;
 int RIGHT = 0;
 
+bool eps_equals(double a, double b) {
+    return (fabs(a - b)) < 0.00001;
+}
 
 double sq(double x) {
     return x * x;
@@ -38,6 +41,12 @@ template<typename T> T pop_back(vector<T> &in) {
     T ret = in[in.size() - 1];
     in.pop_back();
     return ret;
+}
+
+template<typename T> void swap(vector<T> &v, int i, int j) {
+    T tmp = v[i];
+    v[i] = v[j];
+    v[j] = tmp;
 }
 
 class Mat2d;
@@ -95,14 +104,46 @@ class Mat2d {
     double c;
     double d;
     public:
-    Mat2d(double a, double b, double c, double d) {
-        this->a = a; this->b = b; this->c = c; this->d = d;
+    Mat2d(double a_init, double b_init, double c_init, double d_init) {
+        a = a_init; b = b_init; c = c_init; d = d_init;
+    }
+    bool singular() {
+        return eps_equals(det(), 0);
     }
     double det() {
         return a*c-b*d;
     }
     Mat2d inverse() {
         return Mat2d(d, -b, -c, a) * (1.0 / det());
+    }
+    private:
+    Vec2d linsolvehelper(Vec2d expected, bool swapped) {
+        //Technical specification: inverse() * expected, but numerically stable.
+        if (swapped || fabs(a) >= fabs(c)) {
+            double y = (expected.y - ((c*expected.x)/a)) / (d - (c*b)/a);
+            double x = ((expected.x - b*y) / a);
+            return Vec2d(x, y);
+        }
+        else {
+            Vec2d temp = Mat2d(c, d, a, b).linsolvehelper(Vec2d(expected.y, expected.x), true);
+            return Vec2d(temp.y, temp.x);
+        }
+    }
+    public:
+    Vec2d linsolve(Vec2d expected) {
+        return linsolvehelper(expected, false);
+    }
+    Vec2d linsolve2(Vec2d expected) {
+        return linsolven(expected, 2);
+    }
+    Vec2d linsolven(Vec2d expected, int n) {
+        Vec2d x = linsolve(expected);
+        for (int i = 0; i < n - 1; i++) {
+            Vec2d actual = operator*(x);
+            Vec2d dx = linsolve(expected - actual);
+            x = x + dx;
+        }
+        return x;
     }
     Vec2d operator*(const Vec2d& in) {
         return Vec2d(a*in.x + b*in.y, c*in.x + d*in.y);
@@ -179,6 +220,9 @@ class Ring : public Shape {
         this->outer_radius = outer_radius;
         this->type = Shape::Type::RING;
     }
+    string to_string() {
+        return "(" + std::to_string(pos.x) + "," + std::to_string(pos.y) + "," + std::to_string(outer_radius) + ")";
+    }
     Ring move_to(Vec2d p) {
         return Ring(p, inner_radius, outer_radius);
     }
@@ -227,18 +271,38 @@ class Line2d {
     double b;
     double c;
     Line2d(double a, double b, double c) {
-        this->a = a; this->b = b; this->c = c;
+        this->a = a;
+        this->b = b;
+        this->c = c;
     }
+    //Construct a line using <X, c> = b
+    Line2d(Vec2d c, double b) : Line2d(c.x, c.y, b) {}
+
     Vec2d intersect(Line2d other) {
         Mat2d m(a, b, other.a, other.b);
-        m = m.inverse();
+        //m = m.inverse();
         Vec2d k(c, other.c);
-        return m*k;
+        //Vec2d result = m*k;
+        Vec2d result = m.linsolven(k, 4);
+        return result;
+    }
+    bool parallel(Line2d other) {
+        return Mat2d(a, b, other.a, other.b).singular();
+    }
+    Vec2d tangent() {
+        return Vec2d(b, -a);
+    }
+    Vec2d normal() {
+        return Vec2d(a, b);
+    }
+    Vec2d closest_point_to(Vec2d p) {
+        return intersect(Line2d(tangent(), p.dot(tangent())));
     }
 };
 
 Line2d line_through(Vec2d p, Vec2d tangent) {
-    return Line2d(tangent.x, tangent.y, tangent.dot(p));
+    Vec2d perp = tangent.perp();
+    return Line2d(perp, perp.dot(p));
 }
 
 class LineSeg2d : public Shape {
@@ -249,17 +313,21 @@ class LineSeg2d : public Shape {
         pt2(pt2_init.x, pt2_init.y) {
         this->type = Shape::Type::LINESEG;     
     }
+    bool parallel(LineSeg2d other) {
+        Vec2d t = other.tangent();
+        return Mat2d(tangent().x, tangent().y, t.x, t.y).singular();
+    }
     Vec2d perp() {
-        return (pt1 - pt2).perp();
+        return tangent().perp();
     }
     Line2d bisector() {
-        return line_through((pt1 - pt2) * 0.5, perp());
+        return line_through((pt1 + pt2) * 0.5, perp());
     }
     Line2d toLine() {
         return line_through(pt1, tangent());
     }
     Vec2d tangent() {
-        return pt2 - pt1;
+        return (pt2 - pt1);
     }
     Vec2d closest_point_to(Vec2d p) {
         Line2d l = line_through(p, perp());
@@ -285,10 +353,10 @@ class LineSeg2d : public Shape {
     }
 };
 
-//TODO: support materials, as well
-void export_mesh(ostream& out, tinyobj::mesh_t m) {
+//Input: file, mesh, prior vertex index. Output: new vertex index.
+int export_mesh(FILE* out, tinyobj::mesh_t m, int index) {
 
-    auto comma_sep_triple = [](vector<float> in, int base) -> string {
+    auto comma_sep_triple = [](vector<float> &in, int base) -> string {
         return to_string(in[base]) + " " +
                to_string(in[base + 1]) + " " +
                to_string(in[base + 2]);
@@ -300,16 +368,17 @@ void export_mesh(ostream& out, tinyobj::mesh_t m) {
 
     //First, export all vertices
     for (int i = 0; i < m.positions.size(); i += 3) {
-        out << "v " + comma_sep_triple(m.positions, i) + "\n";
+        fputs(("v " + comma_sep_triple(m.positions, i) + "\n").c_str(), out);
     }
     //Then, export all vertex normals
     for (int i = 0; i < m.normals.size(); i += 3) {
-        out << "vn " + comma_sep_triple(m.normals, i) + "\n";
+        fputs(("vn " + comma_sep_triple(m.normals, i) + "\n").c_str(), out);
     }
     //Export all faces (trivial)
-    for (int i = 0; i < m.normals.size(); i += 3) {
-        out << "f " + s(i) + " " + s(i + 1) + " " + s(i + 2) + "\n";
+    for (int i = index; i < (m.positions.size() / 3) + index; i += 3) {
+        fputs(("f " + s(i) + " " + s(i + 1) + " " + s(i + 2) + "\n").c_str(), out);
     }
+    return index + (m.positions.size() / 3);
 }
 
 template<typename T> void append(vector<T> &one, vector<T> &two) {
@@ -356,21 +425,19 @@ class Slice {
     public:
     //Bounding ring of mesh in mesh coordinates
     Ring bounding_ring;
-    //Position of mesh center relative to material
-    Vec2d pos;
     //Mesh represented (there is a unique slice per mesh)
     tinyobj::mesh_t mesh;
     //Name of the slice (as a composite object)
     string name;
 
-    Slice(string name, tinyobj::mesh_t src_mesh) : 
+    Slice(string src_name, tinyobj::mesh_t src_mesh) : 
         bounding_ring(Vec2d(0,0),0,0),
-        pos(0,0), mesh(src_mesh) {
-    }
+        mesh(src_mesh), name(src_name){}
 
-    void export_obj(ostream& dest) {
-        dest << "s 1\n\no " + name << endl;
-        export_mesh(dest, mesh);
+    //Exports an object with the prior vertex index
+    int export_obj(FILE* dest, int index) {
+        fputs(("s 1\n\no " + name + "\n").c_str(), dest);
+        return export_mesh(dest, mesh, index);
     }
 
     //Modifies the bounds of the slice,
@@ -390,7 +457,7 @@ class Slice {
     //Determines if the given slice needs to be flipped (based on having all parts 2.5d-machined
     //from the positive z axis.
     bool needsFlip() {
-        Vec3d cumulative_normal = Vec3d(0, 0, 0);
+        double cumulative_normal_dir = 0;
         //This method is based on computing an cumulative normal (weighted by surface area of triangles)
         for (int i = 0; i < mesh.normals.size(); i += 3) {
             Vec3d normal = Vec3d(mesh.normals[i], mesh.normals[i+1], mesh.normals[i+2]);
@@ -403,9 +470,9 @@ class Slice {
             Vec3d v2 = Vec3d(mesh.positions[t2], mesh.positions[t2 + 1], mesh.positions[t2 + 2]);
             Vec3d v3 = Vec3d(mesh.positions[t3], mesh.positions[t3 + 1], mesh.positions[t3 + 2]);
             double area = (v1 - v2).cross(v3 - v2).norm() * 0.5;
-            cumulative_normal = cumulative_normal + area * normal;
+            cumulative_normal_dir += sgn(normal.z) * fabs(area);
         }
-        return cumulative_normal.z < 0;
+        return cumulative_normal_dir < 0;
     }
 
     //Fits the mesh within the material bounds
@@ -430,9 +497,17 @@ class Slice {
     //in the material bounding box
     void flip() {
         double centerz = MATERIAL_HEIGHT / 2.0;
+        //Flip positions of points
         for (int i = 0; i < mesh.positions.size() / 3; i++) {
             mesh.positions[3*i + 2] = centerz - mesh.positions[3*i + 2];
         }
+        //Now, flip triangles (change orientation)
+        for (int i = 0; i < mesh.positions.size(); i += 9) {
+            swap(mesh.positions, i, i + 3);
+            swap(mesh.positions, i + 1, i + 4);
+            swap(mesh.positions, i + 2, i + 5);
+        }
+        //Flip normal z components
         for (int i = 0; i < mesh.normals.size() / 3; i++) {
             mesh.normals[3*i + 2] *= -1.0;
         }
@@ -441,18 +516,13 @@ class Slice {
     //Flips and fits within the material as necesary
     void flipAndFit() {
         if (needsFlip()) {
+            cerr << "FLIP!" << endl;
             flip();
         }
         fitZ();
     }
 };
 
-
-void swap(vector<Vec2d> &v, int i, int j) {
-    Vec2d tmp = v[i];
-    v[i] = v[j];
-    v[j] = tmp;
-}
 
 void permute(vector<Vec2d> &in) {
     for (int i = 0; i < in.size(); i++) {
@@ -473,15 +543,15 @@ void del_two(vector<Vec2d> &in, int ind1, int ind2) {
     in.pop_back();
 }
 
+Ring calc_circle_two(Vec2d one, Vec2d two) {
+    Vec2d center = 0.5 * (one + two);
+    return Ring(center, 0, fmax(center.dist(one), center.dist(two)));
+}
+
 Ring calc_circle_three(Vec2d one, Vec2d two, Vec2d three) {
     LineSeg2d l1(one, two);
     LineSeg2d l2(two, three);
     Vec2d center = l1.bisector().intersect(l2.bisector());
-    return Ring(center, 0, center.dist(one));
-}
-
-Ring calc_circle_two(Vec2d one, Vec2d two) {
-    Vec2d center = 0.5 * (one + two);
     return Ring(center, 0, center.dist(one));
 }
 
@@ -521,17 +591,23 @@ Ring bounding_circle(vector<Vec2d> planePoints) {
     support.push_back(v2);
     Ring result = calc_circle_two(v1, v2);
 
-    auto pick_better = [&support](Candidate current, Candidate in) -> Candidate {
-        if (current.success && current.ring.outer_radius <= in.ring.outer_radius) {
-            return current;
+    //Forces a given candidate to be "successful" -- that is, contain all of the supporting points
+    //This approach seems more numerically stable than the usual approach.
+    auto force_success = [&support](Candidate& in) {
+        double r = 0;
+        for (Vec2d &p : support) {
+            r = fmax(r, p.dist(in.ring.pos));
         }
-        else {
-            if (!in.ring.fuzz_in(support[in.index1]) ||
-                 (in.index2 != -1 && !in.ring.fuzz_in(support[in.index2]))) {
-                return current;
-            }
+        in.ring.outer_radius = r;
+        in.success = true;
+    };
+
+    auto pick_better = [&support, &force_success](Candidate current, Candidate in) -> Candidate {
+        force_success(in);
+        if (!current.success || in.ring.outer_radius < current.ring.outer_radius) {
             return in;
         }
+        return current;
     };
     auto update = [&support, &result](Candidate in) {
         if (in.index2 == -1) {
@@ -694,14 +770,9 @@ class Placement {
     double d_min;
 };
 
-bool eps_equals(double a, double b) {
-    return (fabs(a - b)) < 0.0001;
-}
-
 vector<double> quad_solve(double a, double b, double c) {
     vector<double> result;
     double discrim = b*b-4*a*c;
-    //TODO: use eps_equals!
     if (eps_equals(discrim, 0)) {
         result.push_back(-b / (2*a));
     }
@@ -720,9 +791,66 @@ vector<Vec2d> perp(vector<Vec2d> in) {
     return result;
 }
 
+vector<Vec2d> get_tangent_circle_center(Ring one, Ring two, double r) {
+    cerr << one.to_string() + two.to_string() + "," + to_string(r) << endl;
+    Vec2d c = two.pos - one.pos;
+    if (eps_equals(c.x, 0) && eps_equals(c.y, 0)) {
+        return vector<Vec2d>();
+    }
+    double d = c.norm();
+    c = c.normalize();
+
+    double r1 = one.outer_radius;
+    double r2 = two.outer_radius;
+    double cos = (sq(r + r1) - sq(r + r2) + sq(d)) / (2.0 * d * (r1 + r));
+    double sin = sqrt(1 - sq(cos));
+    cerr << "cos = " << cos << " sin = " << sin << " d = " << d << endl;
+    Mat2d rotMat1 = Mat2d(cos, sin, -sin, cos);
+    Mat2d rotMat2 = Mat2d(cos, -sin, sin, cos);
+    c = c * (r1 + r);
+    vector<Vec2d> result;
+    result.push_back(one.pos + rotMat1 * c);
+    result.push_back(one.pos + rotMat2 * c);
+    return result;
+}
+
+/*
+//Gets the center (x) of a circle tangent to the two given ones, with radius r.
+vector<Vec2d> get_tangent_circle_center(Ring one, Ring two, double r) {
+    cerr << one.to_string() + two.to_string() + "," + to_string(r) << endl;
+    Vec2d x1 = one.pos;
+    Vec2d x2 = two.pos;
+    double r1 = one.outer_radius;
+    double r2 = two.outer_radius;
+    //First, compute the line the tangent circle must lie on, of the form <X, c> = b
+    Vec2d c = x1 - x2;
+    if (eps_equals(c.x, 0) && eps_equals(c.y, 0)) {
+        //Special case: dealing with the same ring
+        return vector<Vec2d>();
+    }
+
+    double b = (x1.dot(x1) - x2.dot(x2) + sq(r + r2) - sq(r + r1)) / 2.0;
+    cerr << to_string(b) + ",";
+    Line2d l(c, b);
+    //Now, compute the closest point to x1 on the line and the distance of x1 to the line
+    Vec2d p = l.closest_point_to(x1);
+    cerr << to_string(p.x) + "," + to_string(p.y) << endl;
+    double d = x1.dist(p);
+    //Then p, x1, x defines a right triangle with side lengths d, h, r + r1
+    double h = sqrt(sq(r + r1) - sq(d));
+    Vec2d t = l.tangent().normalize();
+    vector<Vec2d> result;
+    result.push_back(p + t*h);
+    result.push_back(p - t*h);
+    return result;
+}
+*/
+
+/*
 //Gets the center of a circle tangent to the two given ones, with radius r.
 //To do this, it uses a (horribly ugly) series of formulas.
 vector<Vec2d> get_tangent_circle_center(Ring one, Ring two, double r) {
+    cerr << one.to_string() + two.to_string() + "," + to_string(r) << endl;
     double r1 = one.outer_radius;
     double r2 = two.outer_radius;
     double x1 = one.pos.x;
@@ -730,10 +858,13 @@ vector<Vec2d> get_tangent_circle_center(Ring one, Ring two, double r) {
     double y1 = one.pos.y;
     double y2 = two.pos.y;
     double ydiff = y2 - y1;
+    
     if (eps_equals(ydiff, 0)) {
         if (eps_equals(x1 - x2, 0)) {
             return vector<Vec2d>();
         }
+    }
+   if (fabs(ydiff) <= fabs(x1 - x2)) {
         //Rotate the whole plane 90 degrees, and try again.
         return perp(
         get_tangent_circle_center(Ring(one.pos.antiperp(), one.inner_radius, one.outer_radius),
@@ -751,8 +882,12 @@ vector<Vec2d> get_tangent_circle_center(Ring one, Ring two, double r) {
     vector<double> x = quad_solve(a, b, c);
     vector<Vec2d> result(x.size(), Vec2d(0,0));
     std::transform(x.begin(), x.end(), result.begin(), [&m, &k](double x) { return Vec2d(x, m*x + k); });
+    for (Vec2d &v : result) {
+        cerr << "Points: " + to_string(v.x) + "," + to_string(v.y) << endl;
+    }
     return result;
 }
+*/
 
 bool placement_valid(Vec2d pos, double r, vector<pair<Slice*, Ring>> &cfg) {
     if (pos.x + r > MATERIAL_WIDTH || pos.x - r < 0 ||
@@ -806,7 +941,7 @@ vector<Placement> gen_placements_involving(Ring one, int index, double r, vector
     auto add_centers = [&index, &cfg, &r, &edges, &result](vector<Vec2d> centers, Shape &one, Shape &two) {
         for (Vec2d center : centers) { 
             add_center(index, center, r, one, two, cfg, edges, result); 
-            //cout << "Placement at " << center.x << " " <<  center.y << "\n";
+            //cerr << "Placement at " << center.x << " " <<  center.y << "\n";
         }
     };
 
@@ -912,6 +1047,7 @@ vector<pair<Slice*, Ring>> ring_pack(vector<Slice*> in) {
         Slice *s = in[accepted.index];
         Ring ci = s->bounding_ring.move_to(accepted.pos);
 
+        cerr << "Circle center: " + to_string(ci.pos.x) + "," + to_string(ci.pos.y) << endl;
         config.emplace_back(s, ci);
 
         //TODO: Make this cache-friendlier?
@@ -993,12 +1129,15 @@ int main(int argc, char* argv[]) {
     }
     path source_dir(argv[1]);
     if (!exists(source_dir) || !is_directory(source_dir)) {
-        cout << "The path input must be a directory!\n";
+        cerr << "The path input must be a directory!\n";
         return 1;
     }
-    ostream& deststream = cout;
+    FILE* deststream = stdout;
     if (argc == 3) {
-        deststream = ofstream(argv[2], std::ofstream::out);
+        deststream = fopen(argv[2], "w");
+        if (deststream == NULL) {
+            cerr << "Cannot open output file!" << endl;
+        }
     }
 
     //We need to bunch together meshes belonging to the same slice in the same file
@@ -1048,23 +1187,41 @@ int main(int argc, char* argv[]) {
     for (Slice* slice : slices) {
         slice->flipAndFit();
         compute_bounds(slice);
+        cerr << slice->bounding_ring.to_string() << endl;
     }
 
     vector<pair<Slice*, Ring>> packed = ring_pack(slices);
-    //Now, for each slice, translate the underlying mesh.
+    
+    //Generate the circle chart and translate the underlying mesh.
+    cout << "<svg xmlns = \"http://www.w3.org/2000/svg\" verstion=\"1.1\">" << endl;
     for (auto sr : packed) {
-        sr.first->modifyBounds(sr.second);
-    }
+        Vec2d c = sr.second.pos;
+        //Write out the circle to SVG
+        cout << "<circle cx=\"" << to_string(c.x) << "\" cy=\"" << to_string(c.y) << "\" r=\"";
+        cout << to_string(sr.second.outer_radius) << "\" fill=\"orange\" />" << endl;
+        
+        //Write out labels to SVG
+        cout << "<text x=\"" << to_string(c.x - sr.second.outer_radius);
+        cout << "\" y=\"" << to_string(c.y) << "\" font-size=\"15\">";
+        cout << sr.first->name << endl;
+        cout << "</text>" << endl;
 
-    cout << nounitbuf;
-    cout.sync_with_stdio(false);
+        //Translate the mesh
+        sr.first->modifyBounds(sr.second);
+        cerr << "Stupid point: " << sr.first->mesh.positions[0] << ", " <<
+            sr.first->mesh.positions[1] << endl;
+    }
+    cout << "</svg>" << endl;
+    
     //Great. Now everything should be fitted, and in the right position. Write .obj file format to stdout.
+    int index = 0;
     for (Slice* slice : slices) {
-        slice->export_obj(deststream);
+        index = slice->export_obj(deststream, index);
+        delete slice;
     }
 
     if (argc == 3) {
-        deststream.close();
+        fclose(deststream);
     }
 
     return 0;
