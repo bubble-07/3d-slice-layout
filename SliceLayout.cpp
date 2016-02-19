@@ -261,6 +261,9 @@ class Ring : public Shape {
     bool intersects(Ring other) {
         return pos.dist(other.pos) < (outer_radius + other.outer_radius);
     }
+    double area() {
+        return (sq(outer_radius) - sq(inner_radius)) * PI;
+    }
     double distance_to(Ring other) {
         return fmax(0, pos.dist(other.pos) - outer_radius - other.outer_radius);
     }
@@ -810,8 +813,8 @@ double min_dist(Ring c, Shape &u, Shape &v, vector<pair<Slice*, Ring>> &cfg, vec
     return d_min;
 }
 
-double hole_degree(Ring c, double d_min) {
-    return (1 - (d_min / c.outer_radius));
+double hole_degree(Ring c, double d_min, double discount_factor) {
+    return (1 - (sq(d_min) / c.outer_radius)) + (sq(c.inner_radius) * discount_factor) / c.outer_radius;
 }
 
 class Placement {
@@ -981,9 +984,43 @@ vector<Placement> gen_placements(int index, double r, vector<pair<Slice*, Ring>>
     return result;
 }
 
+class PackedPage {
+    public:
+    vector<pair<Slice*, Ring>> packed;
+    
+    void export_svg() {
+
+        //Generate the circle chart and translate the underlying mesh.
+        double total_area = 0.0;
+        for (auto sr : packed) {
+            Vec2d c = sr.second.pos;
+            //Write out the ring to SVG
+            cout << "<circle cx=\"" << to_string(c.x) << "\" cy=\"" << to_string(c.y) << "\" r=\"";
+            cout << to_string(sr.second.outer_radius) << "\" fill=\"orange\" />" << endl;
+
+            cout << "<circle cx=\"" << to_string(c.x) << "\" cy=\"" << to_string(c.y) << "\" r=\"";
+            cout << to_string(sr.second.inner_radius) << "\" fill=\"white\" />" << endl;
+            
+            //Write out labels to SVG
+            cout << "<text x=\"" << to_string(c.x - sr.second.outer_radius);
+            cout << "\" y=\"" << to_string(c.y) << "\" font-size=\"15\">";
+            cout << sr.first->name << endl;
+            cout << "</text>" << endl;
+
+            total_area += sr.second.area();
+        }
+        cerr << "Total area on page: " << total_area;
+    }
+    void update_mesh() {
+        for (auto sr : packed) {
+            sr.first->modifyBounds(sr.second);
+        }
+    }
+};
+
 
 //Citation: This is a modified version of http://citeseerx.ist.psu.edu/viewdoc/download?doi=10.1.1.99.5620&rep=rep1&type=pdf
-vector<pair<Slice*, Ring>> ring_pack(vector<Slice*> in) {
+vector<pair<Slice*, Ring>> ring_pack(vector<Slice*> &in) {
     vector<pair<Slice*, Ring>> config;
     vector<Placement> placements;
     vector<LineSeg2d> edges;
@@ -998,6 +1035,12 @@ vector<pair<Slice*, Ring>> ring_pack(vector<Slice*> in) {
     edges.emplace_back(v2, v3);
     edges.emplace_back(v3, v4);
     edges.emplace_back(v4, v1);
+
+    //Defines an exponentially-decreasing "discount factor" that initially gives more preference
+    //to rings in the packing.
+    double discount_factor = 1.0;
+    //TODO: Set this based on some metric on total outer radius / total inner radius.
+    double discount_factor_multiplier = 0.8;
 
     //TODO: I don't like any of the above, or the below.
     //Here, we set the (constant) indices for edges
@@ -1128,12 +1171,14 @@ vector<pair<Slice*, Ring>> ring_pack(vector<Slice*> in) {
         int max_lambda = 0;
         //Find the best corner placement
         for (int i = 0; i < placements.size(); i++) {
-            double lambda = hole_degree(in[placements[i].index]->bounding_ring, placements[i].d_min);
+            double lambda = hole_degree(in[placements[i].index]->bounding_ring, placements[i].d_min, discount_factor);
             if (lambda > max_lambda) {
                 max_index = i;
                 max_lambda = lambda;
             }
         }
+        //Update the discount factor
+        discount_factor *= discount_factor_multiplier;
         addPlacement(placements[max_index]);
     }
     return config;
@@ -1220,10 +1265,12 @@ int main(int argc, char* argv[]) {
         compute_bounds(slice);
     }
 
-    vector<pair<Slice*, Ring>> packed = ring_pack(slices);
+    vector<Slice*> temp_slices = slices;
+    vector<pair<Slice*, Ring>> packed = ring_pack(temp_slices);
     
     //Generate the circle chart and translate the underlying mesh.
     cout << "<svg xmlns = \"http://www.w3.org/2000/svg\" verstion=\"1.1\">" << endl;
+    double total_area = 0.0;
     for (auto sr : packed) {
         Vec2d c = sr.second.pos;
         //Write out the ring to SVG
@@ -1243,8 +1290,11 @@ int main(int argc, char* argv[]) {
         sr.first->modifyBounds(sr.second);
         cerr << "Stupid point: " << sr.first->mesh.positions[0] << ", " <<
             sr.first->mesh.positions[1] << endl;
+        total_area += sr.second.area();
     }
     cout << "</svg>" << endl;
+
+    cerr << "Number packed: " << packed.size() << ", Total slices: " << slices.size() << ", Area: " << total_area << endl;
     
     //Great. Now everything should be fitted, and in the right position. Write .obj file format to stdout.
     int index = 0;
