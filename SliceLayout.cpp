@@ -987,6 +987,10 @@ vector<Placement> gen_placements(int index, double r, vector<pair<Slice*, Ring>>
 class PackedPage {
     public:
     vector<pair<Slice*, Ring>> packed;
+
+    PackedPage(vector<pair<Slice*, Ring>> packed_init) {
+        packed = packed_init;
+    }
     
     void export_svg() {
 
@@ -1011,16 +1015,27 @@ class PackedPage {
         }
         cerr << "Total area on page: " << total_area;
     }
-    void update_mesh() {
+    void update_meshes() {
         for (auto sr : packed) {
             sr.first->modifyBounds(sr.second);
+        }
+    }
+    void export_obj(FILE * deststream) {
+        int index = 0;
+        for (auto sr : packed) {
+            index = sr.first->export_obj(deststream, index);
+        }
+    }
+    void delete_slices() {
+        for (auto sr : packed) {
+            delete sr.first;
         }
     }
 };
 
 
 //Citation: This is a modified version of http://citeseerx.ist.psu.edu/viewdoc/download?doi=10.1.1.99.5620&rep=rep1&type=pdf
-vector<pair<Slice*, Ring>> ring_pack(vector<Slice*> &in) {
+PackedPage ring_pack(vector<Slice*> &in) {
     vector<pair<Slice*, Ring>> config;
     vector<Placement> placements;
     vector<LineSeg2d> edges;
@@ -1181,7 +1196,7 @@ vector<pair<Slice*, Ring>> ring_pack(vector<Slice*> &in) {
         discount_factor *= discount_factor_multiplier;
         addPlacement(placements[max_index]);
     }
-    return config;
+    return PackedPage(config);
 }
 
 //Gets a slice number from a name of the form "Slice_slice-1_Part_0000_"... 
@@ -1196,11 +1211,15 @@ int getSliceNum(string name) {
 string getSliceName(string filename, string nameinfile) {
     return filename + "_" + to_string(getSliceNum(nameinfile));
 }
+
+FILE* get_outfile(string name, int num) {
+    return fopen((name + to_string(num) + ".obj").c_str(), "w");
+}
     
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
-        cout << "Usage: 3d-slice-layout sourcepath (optional: destpath) \n";
+        cout << "Usage: 3d-slice-layout sourcepath destfile \n";
         return 1;
     }
     path source_dir(argv[1]);
@@ -1208,13 +1227,8 @@ int main(int argc, char* argv[]) {
         cerr << "The path input must be a directory!\n";
         return 1;
     }
-    FILE* deststream = stdout;
-    if (argc == 3) {
-        deststream = fopen(argv[2], "w");
-        if (deststream == NULL) {
-            cerr << "Cannot open output file!" << endl;
-        }
-    }
+
+    string destfilename(argv[2]);
 
     //We need to bunch together meshes belonging to the same slice in the same file
     //This is a dumb way to do it.
@@ -1265,47 +1279,32 @@ int main(int argc, char* argv[]) {
         compute_bounds(slice);
     }
 
+    vector<PackedPage> pages;
     vector<Slice*> temp_slices = slices;
-    vector<pair<Slice*, Ring>> packed = ring_pack(temp_slices);
-    
-    //Generate the circle chart and translate the underlying mesh.
-    cout << "<svg xmlns = \"http://www.w3.org/2000/svg\" verstion=\"1.1\">" << endl;
-    double total_area = 0.0;
-    for (auto sr : packed) {
-        Vec2d c = sr.second.pos;
-        //Write out the ring to SVG
-        cout << "<circle cx=\"" << to_string(c.x) << "\" cy=\"" << to_string(c.y) << "\" r=\"";
-        cout << to_string(sr.second.outer_radius) << "\" fill=\"orange\" />" << endl;
-
-        cout << "<circle cx=\"" << to_string(c.x) << "\" cy=\"" << to_string(c.y) << "\" r=\"";
-        cout << to_string(sr.second.inner_radius) << "\" fill=\"white\" />" << endl;
-        
-        //Write out labels to SVG
-        cout << "<text x=\"" << to_string(c.x - sr.second.outer_radius);
-        cout << "\" y=\"" << to_string(c.y) << "\" font-size=\"15\">";
-        cout << sr.first->name << endl;
-        cout << "</text>" << endl;
-
-        //Translate the mesh
-        sr.first->modifyBounds(sr.second);
-        cerr << "Stupid point: " << sr.first->mesh.positions[0] << ", " <<
-            sr.first->mesh.positions[1] << endl;
-        total_area += sr.second.area();
+    while (temp_slices.size() > 0) {
+        pages.push_back(ring_pack(temp_slices));
     }
+
+    //Now, export all the cool stuff we found
+    int pagenum = 1;
+    cout << "<svg xmlns = \"http://www.w3.org/2000/svg\" verstion=\"1.2\" streamedContents=\"true\">" << endl;
+    cout << "<pageSet>" << endl;
+    for (PackedPage &page : pages) {
+        cout << "<page>" << endl;
+        //Label the page
+        cout << "<text x=\"0\" y = \"0\" font-size=\"30\">" << to_string(pagenum) << "</text>" << endl;
+
+        page.export_svg();
+        page.update_meshes();
+        FILE* currentfile = get_outfile(destfilename, pagenum);
+        page.export_obj(currentfile);
+        fclose(currentfile);
+        page.delete_slices();
+        pagenum++;
+        cout << "</page>" << endl;
+    }
+    cout << "</pageSet>" << endl;
     cout << "</svg>" << endl;
-
-    cerr << "Number packed: " << packed.size() << ", Total slices: " << slices.size() << ", Area: " << total_area << endl;
-    
-    //Great. Now everything should be fitted, and in the right position. Write .obj file format to stdout.
-    int index = 0;
-    for (Slice* slice : slices) {
-        index = slice->export_obj(deststream, index);
-        delete slice;
-    }
-
-    if (argc == 3) {
-        fclose(deststream);
-    }
 
     return 0;
 }
