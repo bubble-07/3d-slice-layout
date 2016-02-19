@@ -1155,14 +1155,6 @@ PackedPage ring_pack(vector<Slice*> &in) {
                 int pos_from_back = (in.size() - 1) - p.index;
                 p.index = to_delete_vector[pos_from_back];
             }
-
-            /*
-            //TODO: Need to do this ugly thing for deletes of other things, too!
-            if (p.index == in.size() - 1) {
-                //In this case, change the index to the index of the accepted.
-                p.index = accepted.index; 
-            }
-            */
             new_placements.push_back(p);
         }
         placements.clear();
@@ -1273,6 +1265,7 @@ int main(int argc, char* argv[]) {
         slices.push_back(new Slice(name, combined_mesh));
     }
 
+
     //Compute the bounds of each material, and flip and fit each one within the material
     for (Slice* slice : slices) {
         slice->flipAndFit();
@@ -1280,9 +1273,31 @@ int main(int argc, char* argv[]) {
     }
 
     vector<PackedPage> pages;
-    vector<Slice*> temp_slices = slices;
-    while (temp_slices.size() > 0) {
+    while (slices.size() > 0) {
+        //TODO: Why do we need to do this (as opposed to just passing "in" again? Why is there an "EXEC_BAD_ACCESS" if we don't?
+        //These are the kinds of things that keep me up at night.
+
+        vector<Slice*> temp_slices;
+        append(temp_slices, slices);
+
         pages.push_back(ring_pack(temp_slices));
+
+        temp_slices.clear();
+
+        for (int i = 0; i < slices.size(); i++) {
+            bool keep = true;
+            for (auto sr : pages[pages.size() - 1].packed) {
+                if (sr.first == slices[i]) {
+                    keep = false;
+                    break;
+                }
+            }
+            if (keep) {
+                temp_slices.push_back(slices[i]);
+            }
+        }
+        slices.clear();
+        append(slices, temp_slices);
     }
 
     //Now, export all the cool stuff we found
