@@ -1065,7 +1065,7 @@ PackedPage ring_pack(vector<Slice*> &in) {
     //to rings in the packing.
     double discount_factor = 1.0;
     //TODO: Set this based on some metric on total outer radius / total inner radius.
-    double discount_factor_multiplier = 0.8;
+    double discount_factor_multiplier = 0.5;
 
     //TODO: I don't like any of the above, or the below.
     //Here, we set the (constant) indices for edges
@@ -1288,30 +1288,7 @@ int main(int argc, char* argv[]) {
 
     vector<PackedPage> pages;
     while (slices.size() > 0) {
-        //TODO: Why do we need to do this (as opposed to just passing "in" again? Why is there an "EXEC_BAD_ACCESS" if we don't?
-        //These are the kinds of things that keep me up at night.
-
-        vector<Slice*> temp_slices;
-        append(temp_slices, slices);
-
-        pages.push_back(ring_pack(temp_slices));
-
-        temp_slices.clear();
-
-        for (int i = 0; i < slices.size(); i++) {
-            bool keep = true;
-            for (auto sr : pages[pages.size() - 1].packed) {
-                if (sr.first == slices[i]) {
-                    keep = false;
-                    break;
-                }
-            }
-            if (keep) {
-                temp_slices.push_back(slices[i]);
-            }
-        }
-        slices.clear();
-        append(slices, temp_slices);
+        pages.push_back(ring_pack(slices));
     }
 
     //Now, export all the cool stuff we found
