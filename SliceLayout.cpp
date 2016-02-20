@@ -12,12 +12,13 @@
 using namespace boost::filesystem;
 using namespace std;
 
-//TODO: ADD 1/8" margin around all outer radii!
+//WARNING: Many things in here have problems. Help wanted in tracking down the problems (see TODO's)
 
 double INCHES_TO_MM = 25.4;
 double MATERIAL_WIDTH = 96.0 * INCHES_TO_MM;
 double MATERIAL_LENGTH = 48.0 * INCHES_TO_MM;
 double MATERIAL_HEIGHT = (23.0 / 32.0) * INCHES_TO_MM; 
+double TOOL_RADIUS = (1.0 / 16.0) * INCHES_TO_MM;
 double PI = 3.1415926535;
 
 //To be set later
@@ -504,8 +505,12 @@ class Slice {
             Vec3d v1 = Vec3d(mesh.positions[t1], mesh.positions[t1 + 1], mesh.positions[t1 + 2]);
             Vec3d v2 = Vec3d(mesh.positions[t2], mesh.positions[t2 + 1], mesh.positions[t2 + 2]);
             Vec3d v3 = Vec3d(mesh.positions[t3], mesh.positions[t3 + 1], mesh.positions[t3 + 2]);
+            //Assumption: bounding information is already populated!
+            Vec2d p = bounding_ring.pos;
+            double max_dist = fmax(p.dist(Vec2d(v1.x, v1.y)), fmax(p.dist(Vec2d(v2.x, v2.y)), p.dist(Vec2d(v3.x, v3.y))));
+
             double area = (v1 - v2).cross(v3 - v2).norm() * 0.5;
-            cumulative_normal_dir += sgn(normal.z) * fabs(area);
+            cumulative_normal_dir += sgn(normal.z) * fabs(area) * max_dist;
         }
         return cumulative_normal_dir < 0;
     }
@@ -791,6 +796,10 @@ void compute_bounds(Slice *slice) {
     vector<LineSeg2d> lineSegs = get_line_segs(slice);
 
     get_bounding_ring(slice, lineSegs);
+
+    //Now, adjust the bounds to respect the tool radius
+    slice->bounding_ring.inner_radius = fmax(0.0, slice->bounding_ring.inner_radius - TOOL_RADIUS);
+    slice->bounding_ring.outer_radius += TOOL_RADIUS;
 }
 
 double min_dist(Ring c, Shape &u, Shape &v, vector<pair<Slice*, Ring>> &cfg, vector<LineSeg2d> &edges) {
@@ -1034,7 +1043,8 @@ class PackedPage {
 };
 
 
-//Citation: This is a modified version of http://citeseerx.ist.psu.edu/viewdoc/download?doi=10.1.1.99.5620&rep=rep1&type=pdf
+//Citation: This is a modified version of the non-lookahead algorithm in
+//http://citeseerx.ist.psu.edu/viewdoc/download?doi=10.1.1.99.5620&rep=rep1&type=pdf
 PackedPage ring_pack(vector<Slice*> &in) {
     vector<pair<Slice*, Ring>> config;
     vector<Placement> placements;
@@ -1066,7 +1076,7 @@ PackedPage ring_pack(vector<Slice*> &in) {
     
 
     auto radiusCompare = [](Slice *a, Slice *b) {
-        return a->bounding_ring.outer_radius >= b->bounding_ring.outer_radius;
+        return a->bounding_ring.outer_radius > b->bounding_ring.outer_radius;
     };
 
     //Sorted in order of decreasing radius
@@ -1074,7 +1084,7 @@ PackedPage ring_pack(vector<Slice*> &in) {
 
     //Instead of what's done in the paper, we arbitrarily pick an initial
     //configuration with the two smallest rings at opposite ends of the rectangle.
-    //This reduces the time complexity from O(n^10) to O(n^8), at the possible loss of some packing efficiency.
+    //This reduces the time complexity from O(n^6) to O(n^4), at the possible loss of some packing efficiency.
     Slice* s1 = pop_back(in);
     Slice* s2 = pop_back(in);
     double r1 = s1->bounding_ring.outer_radius;
@@ -1207,6 +1217,10 @@ string getSliceName(string filename, string nameinfile) {
 FILE* get_outfile(string name, int num) {
     return fopen((name + to_string(num) + ".obj").c_str(), "w");
 }
+
+string quote(string in) {
+    return "\"" + in + "\"";
+}
     
 
 int main(int argc, char* argv[]) {
@@ -1268,8 +1282,8 @@ int main(int argc, char* argv[]) {
 
     //Compute the bounds of each material, and flip and fit each one within the material
     for (Slice* slice : slices) {
-        slice->flipAndFit();
         compute_bounds(slice);
+        slice->flipAndFit();
     }
 
     vector<PackedPage> pages;
@@ -1302,10 +1316,10 @@ int main(int argc, char* argv[]) {
 
     //Now, export all the cool stuff we found
     int pagenum = 1;
-    cout << "<svg xmlns = \"http://www.w3.org/2000/svg\" verstion=\"1.2\" streamedContents=\"true\">" << endl;
-    cout << "<pageSet>" << endl;
+    cout << "<svg xmlns = \"http://www.w3.org/2000/svg\" verstion=\"1.1\">" << endl;
     for (PackedPage &page : pages) {
-        cout << "<page>" << endl;
+        cout << "<g transform=\"translate(";
+        cout << "0" << "," << to_string((pagenum - 1) * MATERIAL_LENGTH) << ")\">" << endl;
         //Label the page
         cout << "<text x=\"0\" y = \"0\" font-size=\"30\">" << to_string(pagenum) << "</text>" << endl;
 
@@ -1316,9 +1330,8 @@ int main(int argc, char* argv[]) {
         fclose(currentfile);
         page.delete_slices();
         pagenum++;
-        cout << "</page>" << endl;
+        cout << "</g>" << endl;
     }
-    cout << "</pageSet>" << endl;
     cout << "</svg>" << endl;
 
     return 0;
